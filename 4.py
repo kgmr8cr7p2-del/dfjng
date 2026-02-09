@@ -240,11 +240,14 @@ class SoraWorker:
             if tiktok_config.get("append_hashtags", True):
                 caption = f"{caption}\n#shorts #fyp"
 
-            caption_box = page.locator('textarea[placeholder]').first
+            caption_box = page.locator(
+                'div.caption-editor [contenteditable="true"][role="combobox"]'
+            ).first
             await caption_box.wait_for(state="visible", timeout=90000)
+            await caption_box.click()
             await caption_box.fill(caption)
 
-            post_button = page.locator('button:has-text("Post"), button:has-text("Publish")').first
+            post_button = page.locator('button[data-e2e="post_video_button"]').first
             await post_button.wait_for(state="visible", timeout=90000)
             await post_button.click()
 
