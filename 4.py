@@ -629,6 +629,13 @@ class SoraApp(ctk.CTk):
                             except Exception as e:
                                 logging.error(f"YouTube upload error: {e}")
 
+                            await worker.upload_to_tiktok(
+                                video_file,
+                                topic,
+                                prompt,
+                                self.config.get("tiktok", {}),
+                                self.config.get("tiktok", {}).get("prompt_mode", {}),
+                            )
                             await worker.update_status("Готово! Отправка...", 100)
                             await self.safe_send_video(
                                 bot,
@@ -636,17 +643,6 @@ class SoraApp(ctk.CTk):
                                 types.FSInputFile(video_file),
                                 caption=f"✅ Тема: {topic}\n📝 Промт: {prompt}",
                             )
-                            tiktok_ok = await worker.upload_to_tiktok(
-                                video_file,
-                                topic,
-                                prompt,
-                                self.config.get("tiktok", {}),
-                                self.config.get("tiktok", {}).get("prompt_mode", {}),
-                            )
-                            if tiktok_ok:
-                                await self.safe_send_message(bot, dest, "🎵 Видео опубликовано в TikTok.")
-                            if youtube_id:
-                                await self.safe_send_message(bot, dest, f"📺 Загружено на YouTube: https://youtu.be/{youtube_id}")
 
                             await worker.wait_for_youtube_publish(
                                 youtube_id,
