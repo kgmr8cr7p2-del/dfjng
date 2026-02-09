@@ -5,6 +5,7 @@ import threading
 import logging
 import time
 import random
+import re
 from datetime import datetime, timedelta, timezone
 import customtkinter as ctk
 from aiogram import Bot, Dispatcher, types, F
@@ -61,6 +62,12 @@ class SoraWorker:
             await asyncio.sleep(0.5) 
         except Exception: pass
 
+    def _clean_prompt_line(self, line):
+        cleaned = line.strip().strip('"').strip()
+        cleaned = cleaned.lstrip("-•").strip()
+        cleaned = re.sub(r"^\d+[\).\-\s]+", "", cleaned).strip()
+        return cleaned.replace('"', "")
+
     async def get_smart_prompt(self, topic):
         try:
             await self.update_status("Вход в ChatGPT...", 10)
@@ -91,7 +98,49 @@ class SoraWorker:
             await copy_btn.wait_for(state="visible", timeout=70000)
             
             last_msg = self.page.locator("[data-message-author-role='assistant']").last
-            return (await last_msg.inner_text()).strip().replace('"', '')
+            return self._clean_prompt_line((await last_msg.inner_text()).strip())
+        except Exception as e:
+            logging.error(f"ChatGPT Error: {e}")
+            return None
+
+    async def get_series_prompts(self, topic, count):
+        try:
+            await self.update_status("Вход в ChatGPT...", 10)
+            await self.page.goto("https://chatgpt.com/", timeout=60000)
+            await asyncio.sleep(3)
+
+            await self.update_status("Поиск проекта...", 20)
+            project_btn = self.page.locator('a[href*="generatsiia-video/project"]')
+            await project_btn.wait_for(state="visible", timeout=15000)
+            await project_btn.click()
+            await asyncio.sleep(4)
+
+            await self.update_status("Генерация серии промтов...", 35)
+            input_div = self.page.locator("#prompt-textarea")
+            await input_div.wait_for(state="visible")
+
+            instruction = (
+                f"Generate {count} unique, fast-paced 10-second video prompts for Sora AI about: {topic}. "
+                "Output ONLY the English prompts, each on a new line. Max 250 characters each. "
+                "Keep the same theme but vary subjects/details between prompts. "
+                "Intense movement, 4k. IMPORTANT: Each video must be a perfect SEAMLESS LOOP; "
+                "the first and last frames must be identical."
+            )
+            await input_div.fill(instruction)
+            await input_div.press("Enter")
+            await asyncio.sleep(30)
+            await self.update_status("Жду ответа GPT...", 50)
+            copy_btn = self.page.locator('button:has(svg use[href*="f6d0e2"]), button[aria-label="Copy"]').last
+            await copy_btn.wait_for(state="visible", timeout=70000)
+
+            last_msg = self.page.locator("[data-message-author-role='assistant']").last
+            raw_text = (await last_msg.inner_text()).strip()
+            prompts = []
+            for line in raw_text.splitlines():
+                cleaned = self._clean_prompt_line(line)
+                if cleaned:
+                    prompts.append(cleaned)
+            return prompts[:count]
         except Exception as e:
             logging.error(f"ChatGPT Error: {e}")
             return None
@@ -443,6 +492,11 @@ class SoraApp(ctk.CTk):
                     "static_description": "AI video from Sora2.",
                 },
             },
+            "series": {
+                "size": 3,
+                "rotate_topics": False,
+                "shuffle_topics": True,
+            },
         }
         if os.path.exists("config.json"):
             with open("config.json", "r", encoding="utf-8") as f:
@@ -454,6 +508,7 @@ class SoraApp(ctk.CTk):
                     **defaults["tiktok"]["prompt_mode"],
                     **self.config.get("tiktok", {}).get("prompt_mode", {}),
                 }
+                merged["series"] = {**defaults["series"], **self.config.get("series", {})}
                 self.config = merged
                 self.token_entry.insert(0, self.config.get("bot_token", ""))
                 self.chat_entry.insert(0, self.config.get("target_chat_id", ""))
@@ -506,6 +561,7 @@ class SoraApp(ctk.CTk):
                 "schedule": schedule,
             },
             "tiktok": self.config.get("tiktok", {}),
+            "series": self.config.get("series", {}),
         }
         with open("config.json", "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=4, ensure_ascii=False)
@@ -650,9 +706,9 @@ class SoraApp(ctk.CTk):
                 return
             topic = random.choice(self.config["topics"])
             await m.answer(f"🎲 Случайная тема: {topic}")
-            await start_topic_pipeline(m, topic)
+            await start_topic_pipeline(m, topic, topic_cycle=self.config["topics"])
 
-        async def start_topic_pipeline(message: types.Message, topic: str):
+        async def start_topic_pipeline(message: types.Message, topic: str, topic_cycle=None):
             if topic not in self.config["topics"] or not self.bot_running:
                 return
             
@@ -702,14 +758,39 @@ class SoraApp(ctk.CTk):
                         logging.error("Периодичность публикации должна быть больше 0 минут.")
                         interval_minutes = 1
 
+                    series_config = self.config.get("series", {})
+                    series_size = max(1, int(series_config.get("size", 1) or 1))
+                    rotate_topics = bool(series_config.get("rotate_topics", False))
+                    shuffle_topics = bool(series_config.get("shuffle_topics", True))
+                    cycle_topics = list(topic_cycle or [])
+                    if cycle_topics and shuffle_topics:
+                        random.shuffle(cycle_topics)
+                    cycle_index = 0
+                    series_prompts = []
+                    series_index = 0
+
                     while self.active_sessions.get(user_id) and self.bot_running:
                         # Создаем сообщение прогресса
                         status_msg = await self.safe_send_message(bot, dest, "🎬 Начало цикла...")
                         dest = status_msg.chat.id
                         worker = SoraWorker(page, status_msg, bot, dest)
-                        
+
                         # 1. ChatGPT
-                        prompt = await worker.get_smart_prompt(topic)
+                        if not series_prompts or series_index >= len(series_prompts):
+                            if rotate_topics and cycle_topics:
+                                topic = cycle_topics[cycle_index % len(cycle_topics)]
+                                cycle_index += 1
+                                await self.safe_send_message(bot, dest, f"🧭 Новая тема: {topic}")
+
+                            if series_size > 1:
+                                series_prompts = await worker.get_series_prompts(topic, series_size) or []
+                            else:
+                                single_prompt = await worker.get_smart_prompt(topic)
+                                series_prompts = [single_prompt] if single_prompt else []
+                            series_index = 0
+
+                        prompt = series_prompts[series_index] if series_prompts else None
+                        series_index += 1
                         if not prompt:
                             await self.safe_send_message(dest=dest, bot=bot, text="❌ Ошибка ChatGPT. Повтор...")
                             await asyncio.sleep(20)
