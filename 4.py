@@ -637,11 +637,10 @@ class SoraApp(ctk.CTk):
                                 self.config.get("tiktok", {}).get("prompt_mode", {}),
                             )
                             await worker.update_status("Готово! Отправка...", 100)
-                            await self.safe_send_video(
+                            await self.safe_send_message(
                                 bot,
                                 dest,
-                                types.FSInputFile(video_file),
-                                caption=f"✅ Тема: {topic}\n📝 Промт: {prompt}",
+                                f"✅ Готово! Видео успешно обработано.\nТема: {topic}",
                             )
 
                             await worker.wait_for_youtube_publish(
