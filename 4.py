@@ -118,20 +118,32 @@ class SoraWorker:
             await asyncio.sleep(5)
 
             await self.update_status("Подготовка к скачиванию...", 95)
-            await self.page.locator('a[href^="/d/"]').first.click()
-            await asyncio.sleep(5)
-            
-            menu_btn = self.page.locator("button").filter(has=self.page.locator('path[d*="M3 12a2 2 0 1 1 4 0"]')).last
-            await menu_btn.click()
-            
-            async with self.page.expect_download(timeout=60000) as download_info:
-                # Клик по пункту меню скачивания
-                await self.page.locator('div[role="menuitem"]').filter(has=self.page.locator('path[d*="M12 7.1a.9.9 0 0 1 .9.9"]')).first.click()
-            
-            download = await download_info.value
-            path = f"video_{int(time.time())}.mp4"
-            await download.save_as(path)
-            return path
+            retries = 3
+            for attempt in range(1, retries + 1):
+                try:
+                    await self.page.locator('a[href^="/d/"]').first.click()
+                    await asyncio.sleep(5)
+
+                    menu_btn = self.page.locator("button").filter(
+                        has=self.page.locator('path[d*="M3 12a2 2 0 1 1 4 0"]')
+                    ).last
+                    await menu_btn.click()
+
+                    async with self.page.expect_download(timeout=120000) as download_info:
+                        # Клик по пункту меню скачивания
+                        await self.page.locator('div[role="menuitem"]').filter(
+                            has=self.page.locator('path[d*="M12 7.1a.9.9 0 0 1 .9.9"]')
+                        ).first.click()
+
+                    download = await download_info.value
+                    path = f"video_{int(time.time())}.mp4"
+                    await download.save_as(path)
+                    return path
+                except Exception as e:
+                    logging.error(f"Sora download attempt {attempt}/{retries} failed: {e}")
+                    await asyncio.sleep(5)
+                    await self.page.reload()
+                    await asyncio.sleep(5)
         except Exception as e:
             logging.error(f"Sora Error: {e}")
             return None
