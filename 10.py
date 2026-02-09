@@ -5,6 +5,8 @@ import threading
 import logging
 import time
 import random
+import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
 import customtkinter as ctk
 from aiogram import Bot, Dispatcher, types, F
@@ -149,6 +151,111 @@ class SoraWorker:
         except Exception as e:
             logging.error(f"Sora Error: {e}")
             return None
+
+    def _build_concat_file(self, video_files):
+        concat_file = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".txt",
+            delete=False,
+            encoding="utf-8",
+        )
+        with concat_file:
+            for file_path in video_files:
+                abs_path = os.path.abspath(file_path)
+                escaped_path = abs_path.replace("'", "\\'")
+                concat_file.write(f"file '{escaped_path}'\n")
+        return concat_file.name
+
+    def _run_ffmpeg(self, command):
+        try:
+            return subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError as exc:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=1,
+                stdout="",
+                stderr=f"ffmpeg не найден: {exc}",
+            )
+
+    def _format_ffmpeg_error(self, *errors):
+        cleaned = [err.strip() for err in errors if err and err.strip()]
+        if not cleaned:
+            return "Неизвестная ошибка ffmpeg."
+        return "\n\n".join(cleaned)
+
+    def _truncate_for_telegram(self, text, limit=3500):
+        if not text:
+            return text
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}...\n(сообщение обрезано)"
+
+    async def merge_videos(self, video_files, output_file):
+        if len(video_files) < 2:
+            return output_file, None
+        concat_file = self._build_concat_file(video_files)
+        try:
+            copy_command = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                concat_file,
+                "-c",
+                "copy",
+                output_file,
+            ]
+            result = self._run_ffmpeg(copy_command)
+            if result.returncode == 0:
+                return output_file, None
+            first_error = result.stderr
+
+            reencode_command = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                concat_file,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                output_file,
+            ]
+            result = self._run_ffmpeg(reencode_command)
+            if result.returncode == 0:
+                return output_file, None
+            second_error = result.stderr
+            error_text = self._format_ffmpeg_error(first_error, second_error)
+            return None, self._truncate_for_telegram(error_text)
+        finally:
+            if os.path.exists(concat_file):
+                os.remove(concat_file)
 
     async def upload_to_youtube(self, video_file, topic, prompt, youtube_config, publish_at=None):
         if not youtube_config.get("enabled"):
@@ -443,6 +550,11 @@ class SoraApp(ctk.CTk):
                     "static_description": "AI video from Sora2.",
                 },
             },
+            "merge": {
+                "enabled": False,
+                "prepend_files": [],
+                "append_files": [],
+            },
         }
         if os.path.exists("config.json"):
             with open("config.json", "r", encoding="utf-8") as f:
@@ -450,6 +562,7 @@ class SoraApp(ctk.CTk):
                 merged = {**defaults, **self.config}
                 merged["youtube"] = {**defaults["youtube"], **self.config.get("youtube", {})}
                 merged["tiktok"] = {**defaults["tiktok"], **self.config.get("tiktok", {})}
+                merged["merge"] = {**defaults["merge"], **self.config.get("merge", {})}
                 merged["tiktok"]["prompt_mode"] = {
                     **defaults["tiktok"]["prompt_mode"],
                     **self.config.get("tiktok", {}).get("prompt_mode", {}),
@@ -506,6 +619,7 @@ class SoraApp(ctk.CTk):
                 "schedule": schedule,
             },
             "tiktok": self.config.get("tiktok", {}),
+            "merge": self.config.get("merge", {}),
         }
         with open("config.json", "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=4, ensure_ascii=False)
@@ -719,6 +833,29 @@ class SoraApp(ctk.CTk):
                         video_file = await worker.run_sora(prompt)
                         
                         if video_file and os.path.exists(video_file):
+                            merge_config = self.config.get("merge", {})
+                            if merge_config.get("enabled"):
+                                prepend_files = merge_config.get("prepend_files") or []
+                                append_files = merge_config.get("append_files") or []
+                                concat_files = [*prepend_files, video_file, *append_files]
+                                if len(concat_files) > 1:
+                                    merged_output = f"merged_{int(time.time())}.mp4"
+                                    merged_file, merge_error = await worker.merge_videos(
+                                        concat_files,
+                                        merged_output,
+                                    )
+                                    if not merged_file:
+                                        message = "❌ Не удалось объединить видео."
+                                        if merge_error:
+                                            message = f"{message}\n\nFFmpeg:\n{merge_error}"
+                                        await self.safe_send_message(bot, dest, message)
+                                        if os.path.exists(video_file):
+                                            os.remove(video_file)
+                                        continue
+                                    if merged_file != video_file and os.path.exists(video_file):
+                                        os.remove(video_file)
+                                    video_file = merged_file
+
                             youtube_id = None
                             try:
                                 scheduled_publish_at = None
