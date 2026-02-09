@@ -1,0 +1,300 @@
+import asyncio
+import os
+import json
+import threading
+import logging
+import time
+import customtkinter as ctk
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from playwright.async_api import async_playwright
+
+# Настройка логирования для вывода в окно GUI
+class TextHandler(logging.Handler):
+    def __init__(self, text_widget):
+        super().__init__()
+        self.text_widget = text_widget
+
+    def emit(self, record):
+        msg = self.format(record)
+        def append():
+            self.text_widget.configure(state="normal")
+            self.text_widget.insert("end", msg + "\n")
+            self.text_widget.see("end")
+            self.text_widget.configure(state="disabled")
+        self.text_widget.after(0, append)
+
+def get_progress_bar(percent):
+    length = 10
+    filled = int(length * percent / 100)
+    bar = "█" * filled + "░" * (length - filled)
+    return f"[{bar}] {percent}%"
+
+# --- КЛАСС ГЕНЕРАЦИИ (ДВИЖОК) ---
+class SoraWorker:
+    def __init__(self, page, status_msg, bot, chat_id):
+        self.page = page
+        self.status_msg = status_msg
+        self.bot = bot
+        self.chat_id = chat_id
+
+    async def update_status(self, text, percent):
+        """Редактирует сообщение в Telegram с прогресс-баром."""
+        bar = get_progress_bar(percent)
+        new_text = f"⏳ **Прогресс:**\n{bar}\n📍 {text}"
+        logging.info(f"Статус: {percent}% - {text}")
+        try:
+            await self.bot.edit_message_text(
+                chat_id=self.chat_id,
+                message_id=self.status_msg.message_id,
+                text=new_text,
+                parse_mode="Markdown"
+            )
+            await asyncio.sleep(0.5) 
+        except Exception: pass
+
+    async def get_smart_prompt(self, topic):
+        try:
+            await self.update_status("Вход в ChatGPT...", 10)
+            await self.page.goto("https://chatgpt.com/", timeout=60000)
+            await asyncio.sleep(3)
+            
+            await self.update_status("Поиск проекта...", 20)
+            project_btn = self.page.locator('a[href*="generatsiia-video/project"]')
+            await project_btn.wait_for(state="visible", timeout=15000)
+            await project_btn.click()
+            await asyncio.sleep(4)
+
+            await self.update_status("Генерация промта...", 35)
+            input_div = self.page.locator("#prompt-textarea")
+            await input_div.wait_for(state="visible")
+            
+            instruction = (
+                f"Create a unique, fast-paced 10-second video prompt for Sora AI: {topic}. "
+                "Output ONLY the English text. Max 250 characters. Intense movement, 4k. "
+                "IMPORTANT: The video must be a perfect SEAMLESS LOOP. "
+                "The first and last frames must be identical so the start and end are indistinguishable."
+            )
+            await input_div.fill(instruction)
+            await input_div.press("Enter")
+            await asyncio.sleep(30)
+            await self.update_status("Жду ответа GPT...", 50)
+            copy_btn = self.page.locator('button:has(svg use[href*="f6d0e2"]), button[aria-label="Copy"]').last
+            await copy_btn.wait_for(state="visible", timeout=70000)
+            
+            last_msg = self.page.locator("[data-message-author-role='assistant']").last
+            return (await last_msg.inner_text()).strip().replace('"', '')
+        except Exception as e:
+            logging.error(f"ChatGPT Error: {e}")
+            return None
+
+    async def run_sora(self, prompt):
+        try:
+            await self.update_status("Вход в Sora...", 60)
+            await self.page.goto("https://sora.chatgpt.com/explore", timeout=60000)
+            await asyncio.sleep(5)
+            
+            await self.update_status("Ввод промта в Sora...", 70)
+            # Улучшенный поиск поля ввода
+            textarea = self.page.locator('textarea[placeholder*="create"], textarea').first
+            await textarea.wait_for(state="visible", timeout=30000)
+            await textarea.fill(prompt)
+            
+            create_btn = self.page.locator("button:has-text('Create video'), button:has-text('Generate')").first
+            await create_btn.click()
+            
+            await asyncio.sleep(3)
+            await self.page.goto("https://sora.chatgpt.com/drafts")
+            
+            await self.update_status("Рендеринг (270 сек)...", 85)
+            await asyncio.sleep(270)
+            await self.page.reload()
+            await asyncio.sleep(5)
+
+            await self.update_status("Подготовка к скачиванию...", 95)
+            await self.page.locator('a[href^="/d/"]').first.click()
+            await asyncio.sleep(5)
+            
+            menu_btn = self.page.locator("button").filter(has=self.page.locator('path[d*="M3 12a2 2 0 1 1 4 0"]')).last
+            await menu_btn.click()
+            
+            async with self.page.expect_download(timeout=60000) as download_info:
+                # Клик по пункту меню скачивания
+                await self.page.locator('div[role="menuitem"]').filter(has=self.page.locator('path[d*="M12 7.1a.9.9 0 0 1 .9.9"]')).first.click()
+            
+            download = await download_info.value
+            path = f"video_{int(time.time())}.mp4"
+            await download.save_as(path)
+            return path
+        except Exception as e:
+            logging.error(f"Sora Error: {e}")
+            return None
+
+# --- ИНТЕРФЕЙС ГРАФИЧЕСКОГО ОКНА ---
+class SoraApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Sora Factory Pro")
+        self.geometry("1000x700")
+        
+        self.active_sessions = {}
+        self.bot_running = False
+        self.loop = None
+        self.config = {}
+
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # Боковая панель
+        self.sidebar = ctk.CTkFrame(self, width=320)
+        self.sidebar.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+
+        ctk.CTkLabel(self.sidebar, text="НАСТРОЙКИ", font=("Arial", 20, "bold")).pack(pady=15)
+        
+        self.token_entry = self.create_input("Telegram Bot Token")
+        self.chat_entry = self.create_input("Target Chat ID (Optional)")
+        
+        ctk.CTkLabel(self.sidebar, text="Темы кнопок:").pack(pady=(10, 0))
+        self.topics_text = ctk.CTkTextbox(self.sidebar, height=250)
+        self.topics_text.pack(fill="x", padx=10, pady=5)
+
+        self.save_btn = ctk.CTkButton(self.sidebar, text="💾 СОХРАНИТЬ КОНФИГ", command=self.save_config, fg_color="#4A4A4A")
+        self.save_btn.pack(pady=5)
+
+        self.start_btn = ctk.CTkButton(self.sidebar, text="СТАРТ БОТА", fg_color="green", command=self.start_bot)
+        self.start_btn.pack(pady=5)
+        
+        self.stop_btn = ctk.CTkButton(self.sidebar, text="СТОП БОТА", fg_color="red", command=self.stop_bot, state="disabled")
+        self.stop_btn.pack(pady=5)
+
+        # Окно логов
+        self.log_view = ctk.CTkTextbox(self, state="disabled", font=("Consolas", 12))
+        self.log_view.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+
+        self.load_config()
+        logging.getLogger().addHandler(TextHandler(self.log_view))
+        logging.getLogger().setLevel(logging.INFO)
+
+    def create_input(self, placeholder):
+        entry = ctk.CTkEntry(self.sidebar, placeholder_text=placeholder)
+        entry.pack(fill="x", padx=10, pady=5)
+        return entry
+
+    def load_config(self):
+        if os.path.exists("config.json"):
+            with open("config.json", "r", encoding="utf-8") as f:
+                self.config = json.load(f)
+                self.token_entry.insert(0, self.config.get("bot_token", ""))
+                self.chat_entry.insert(0, self.config.get("target_chat_id", ""))
+                self.topics_text.insert("1.0", "\n".join(self.config.get("topics", [])))
+        else:
+            self.topics_text.insert("1.0", "Фракталы\nКиберпанк\nЖидкости")
+            self.save_config()
+
+    def save_config(self):
+        topics = [t.strip() for t in self.topics_text.get("1.0", "end").split("\n") if t.strip()]
+        self.config = {
+            "bot_token": self.token_entry.get(),
+            "target_chat_id": self.chat_entry.get(),
+            "topics": topics
+        }
+        with open("config.json", "w", encoding="utf-8") as f:
+            json.dump(self.config, f, indent=4, ensure_ascii=False)
+        logging.info("Конфигурация сохранена.")
+
+    def start_bot(self):
+        self.save_config()
+        if not self.config["bot_token"]:
+            logging.error("Токен бота пуст!")
+            return
+        self.bot_running = True
+        self.start_btn.configure(state="disabled", text="РАБОТАЕТ")
+        self.stop_btn.configure(state="normal")
+        threading.Thread(target=self.run_async_loop, daemon=True).start()
+
+    def stop_bot(self):
+        self.bot_running = False
+        self.active_sessions.clear()
+        if self.loop: self.loop.call_soon_threadsafe(self.loop.stop)
+        self.start_btn.configure(state="normal", text="СТАРТ БОТА")
+        self.stop_btn.configure(state="disabled")
+
+    def run_async_loop(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_until_complete(self.bot_main())
+        except Exception: pass
+
+    async def bot_main(self):
+        bot = Bot(token=self.config["bot_token"])
+        dp = Dispatcher()
+
+        @dp.message(F.text == "/start")
+        async def cmd_start(m: types.Message):
+            builder = ReplyKeyboardBuilder()
+            for t in self.config["topics"]: builder.button(text=t)
+            builder.button(text="⏹ ОСТАНОВИТЬ")
+            await m.answer("Выберите тему:", reply_markup=builder.adjust(2).as_markup(resize_keyboard=True))
+
+        @dp.message(F.text == "⏹ ОСТАНОВИТЬ")
+        async def cmd_stop(m: types.Message):
+            self.active_sessions[m.from_user.id] = False
+            await m.answer("🛑 Останавливаю конвейер...")
+
+        @dp.message()
+        async def handle_loop(message: types.Message):
+            if message.text not in self.config["topics"] or not self.bot_running: return
+            
+            user_id = message.from_user.id
+            topic = message.text
+            self.active_sessions[user_id] = True
+            dest = self.config["target_chat_id"] if self.config["target_chat_id"] else message.chat.id
+            
+            await message.answer(f"🚀 Запуск конвейера: {topic}")
+
+            async with async_playwright() as p:
+                try:
+                    browser = await p.chromium.connect_over_cdp("http://localhost:9222")
+                    context = browser.contexts[0]
+                    page = context.pages[0] if context.pages else await context.new_page()
+                    
+                    while self.active_sessions.get(user_id) and self.bot_running:
+                        # Создаем сообщение прогресса
+                        status_msg = await bot.send_message(dest, "🎬 Начало цикла...")
+                        worker = SoraWorker(page, status_msg, bot, dest)
+                        
+                        # 1. ChatGPT
+                        prompt = await worker.get_smart_prompt(topic)
+                        if not prompt:
+                            await bot.send_message(dest, "❌ Ошибка ChatGPT. Повтор...")
+                            await asyncio.sleep(20)
+                            continue
+                            
+                        # 2. Sora
+                        video_file = await worker.run_sora(prompt)
+                        
+                        if video_file and os.path.exists(video_file):
+                            await worker.update_status("Готово! Отправка...", 100)
+                            await bot.send_video(
+                                dest, 
+                                types.FSInputFile(video_file), 
+                                caption=f"✅ Тема: {topic}\n📝 Промт: {prompt}"
+                            )
+                            os.remove(video_file)
+                            try: await bot.delete_message(dest, status_msg.message_id)
+                            except: pass
+                        else:
+                            await bot.send_message(dest, "❌ Sora не отдала файл.")
+
+                        if not self.active_sessions.get(user_id): break
+                        await asyncio.sleep(10)
+                except Exception as e:
+                    logging.error(f"Браузер Error: {e}")
+
+        logging.info("Бот запущен и ожидает команд...")
+        await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    app = SoraApp()
+    app.mainloop()
