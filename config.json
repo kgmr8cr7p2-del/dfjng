@@ -41,6 +41,9 @@
     },
     "tiktok": {
         "enabled": false,
+        "mode": "web",
+        "access_token": "",
+        "open_id": "",
         "caption_template": "{static}\n\n{prompt_text}",
         "append_hashtags": true,
         "prompt_mode": {

@@ -7,6 +7,7 @@ import time
 import random
 from datetime import datetime, timedelta, timezone
 import customtkinter as ctk
+import requests
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.exceptions import TelegramMigrateToChat
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
@@ -226,6 +227,9 @@ class SoraWorker:
         if not tiktok_config.get("enabled"):
             return False
 
+        if tiktok_config.get("mode", "web") == "api":
+            return await self.upload_to_tiktok_api(video_file, topic, prompt, tiktok_config, prompt_mode)
+
         await self.update_status("Загрузка на TikTok...", 98)
         logging.info("TikTok: начинаю загрузку файла.")
 
@@ -271,6 +275,52 @@ class SoraWorker:
         finally:
             await context.close()
 
+    async def upload_to_tiktok_api(self, video_file, topic, prompt, tiktok_config, prompt_mode):
+        await self.update_status("Загрузка на TikTok (API)...", 98)
+        logging.info("TikTok API: начинаю загрузку файла.")
+
+        access_token = tiktok_config.get("access_token")
+        open_id = tiktok_config.get("open_id")
+        if not access_token or not open_id:
+            logging.error("TikTok API: отсутствуют access_token/open_id.")
+            return False
+
+        caption_template = tiktok_config.get("caption_template", "{static}\n\n{prompt_text}")
+        caption = self._build_description(topic, prompt, prompt_mode, caption_template)
+        tags = ["#shorts", "#fyp"] if tiktok_config.get("append_hashtags", True) else []
+        if tags:
+            caption = f"{caption}\n{' '.join(tags)}"
+
+        def do_upload():
+            headers = {"Authorization": f"Bearer {access_token}"}
+            init_payload = {
+                "open_id": open_id,
+                "video_size": os.path.getsize(video_file),
+                "post_info": {"title": caption},
+            }
+            init_resp = requests.post(
+                "https://open.tiktokapis.com/v2/post/publish/video/init/",
+                json=init_payload,
+                headers=headers,
+                timeout=60,
+            )
+            init_resp.raise_for_status()
+            data = init_resp.json()
+            upload_url = data["data"]["upload_url"]
+            publish_id = data["data"]["publish_id"]
+
+            with open(video_file, "rb") as f:
+                upload_resp = requests.put(upload_url, data=f, timeout=300)
+                upload_resp.raise_for_status()
+            return publish_id
+
+        try:
+            publish_id = await asyncio.to_thread(do_upload)
+            logging.info("TikTok API: загрузка завершена (publish_id=%s).", publish_id)
+            return True
+        except Exception as e:
+            logging.error(f"TikTok API upload error: {e}")
+            return False
     def _summarize_prompt(self, prompt, limit):
         cleaned = " ".join(prompt.split())
         if len(cleaned) <= limit:
@@ -435,6 +485,9 @@ class SoraApp(ctk.CTk):
             },
             "tiktok": {
                 "enabled": False,
+                "mode": "web",
+                "access_token": "",
+                "open_id": "",
                 "caption_template": "{static}\n\n{prompt_text}",
                 "append_hashtags": True,
                 "prompt_mode": {

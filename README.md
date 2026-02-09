@@ -42,3 +42,10 @@
 - `caption_template` — шаблон описания (поддерживает `{static}`, `{prompt_text}`)
 - `append_hashtags` — добавляет `#shorts #fyp`
 - `prompt_mode` — те же параметры 80/20, что и для YouTube
+
+#### TikTok API
+
+Можно использовать официальный API:
+
+- `tiktok.mode: "api"`
+- `tiktok.access_token` и `tiktok.open_id` обязательны
