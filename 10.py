@@ -815,7 +815,11 @@ class SoraApp(ctk.CTk):
         chunk_size = 50
         for index in range(0, len(video_ids), chunk_size):
             chunk = video_ids[index : index + chunk_size]
-            response = youtube.videos().list(part="statistics", id=",".join(chunk)).execute()
+            try:
+                response = youtube.videos().list(part="statistics", id=",".join(chunk)).execute()
+            except Exception as exc:
+                logging.error("YouTube: ошибка чтения статистики: %s", exc)
+                return None
             for item in response.get("items", []):
                 stats = item.get("statistics", {})
                 try:
@@ -852,7 +856,7 @@ class SoraApp(ctk.CTk):
         view_stats = self.fetch_youtube_view_stats()
         view_lines = []
         if view_stats is None:
-            view_lines.append("Недоступно (включите YouTube и заполните OAuth-данные).")
+            view_lines.append("Недоступно (проверьте OAuth/доступы YouTube).")
         elif not view_stats:
             view_lines.append("Нет данных по просмотрам (нет сохраненных YouTube ID).")
         else:
