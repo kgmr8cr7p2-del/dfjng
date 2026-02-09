@@ -5,7 +5,7 @@ import threading
 import logging
 import time
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import customtkinter as ctk
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.exceptions import TelegramMigrateToChat
@@ -343,6 +343,7 @@ class SoraApp(ctk.CTk):
         self.bot_running = False
         self.loop = None
         self.config = {}
+        self.stats = {"videos": []}
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -373,6 +374,8 @@ class SoraApp(ctk.CTk):
         
         self.stop_btn = ctk.CTkButton(self.sidebar, text="СТОП БОТА", fg_color="red", command=self.stop_bot, state="disabled")
         self.stop_btn.pack(pady=5)
+        self.restart_btn = ctk.CTkButton(self.sidebar, text="ПЕРЕЗАПУСТИТЬ БОТА", fg_color="#1E88E5", command=self.restart_bot)
+        self.restart_btn.pack(pady=5)
 
         # Окно логов
         self.log_panel = ctk.CTkFrame(self)
@@ -386,6 +389,7 @@ class SoraApp(ctk.CTk):
         self.log_view.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
 
         self.load_config()
+        self.load_stats()
         logging.getLogger().addHandler(TextHandler(self.log_view))
         logging.getLogger().setLevel(logging.INFO)
 
@@ -457,6 +461,24 @@ class SoraApp(ctk.CTk):
             self.topics_text.insert("1.0", "\n".join(self.config["topics"]))
             self.save_config()
 
+    def load_stats(self):
+        if os.path.exists("stats.json"):
+            with open("stats.json", "r", encoding="utf-8") as f:
+                self.stats = json.load(f)
+        else:
+            self.stats = {"videos": []}
+            self.save_stats()
+
+    def save_stats(self):
+        with open("stats.json", "w", encoding="utf-8") as f:
+            json.dump(self.stats, f, indent=2, ensure_ascii=False)
+
+    def record_video_stat(self, topic):
+        self.stats.setdefault("videos", []).append(
+            {"topic": topic, "timestamp": datetime.now(timezone.utc).isoformat()}
+        )
+        self.save_stats()
+
     def save_config(self):
         topics = [t.strip() for t in self.topics_text.get("1.0", "end").split("\n") if t.strip()]
         schedule = self.config.get("youtube", {}).get("schedule", {})
@@ -482,6 +504,10 @@ class SoraApp(ctk.CTk):
         with open("config.json", "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=4, ensure_ascii=False)
         logging.info("Конфигурация сохранена.")
+
+    def restart_bot(self):
+        self.stop_bot()
+        self.after(500, self.start_bot)
 
     def update_target_chat_id(self, new_chat_id):
         self.config["target_chat_id"] = str(new_chat_id)
@@ -537,13 +563,59 @@ class SoraApp(ctk.CTk):
         async def cmd_start(m: types.Message):
             builder = ReplyKeyboardBuilder()
             for t in self.config["topics"]: builder.button(text=t)
+            builder.button(text="🎲 РАНДОМ")
             builder.button(text="⏹ ОСТАНОВИТЬ")
             await m.answer("Выберите тему:", reply_markup=builder.adjust(2).as_markup(resize_keyboard=True))
+
+        @dp.message(F.text.startswith("/schedule"))
+        async def cmd_schedule(m: types.Message):
+            parts = m.text.split()
+            if len(parts) != 4:
+                await m.answer("Формат: /schedule HH:MM интервал_мин количество")
+                return
+            _, start_time, interval_str, count_str = parts
+            try:
+                start_hour, start_minute = map(int, start_time.split(":"))
+                if not (0 <= start_hour <= 23 and 0 <= start_minute <= 59):
+                    raise ValueError
+                interval = int(interval_str)
+                count = int(count_str)
+            except ValueError:
+                await m.answer("Неверные параметры. Пример: /schedule 12:30 120 3")
+                return
+            schedule = self.config.get("youtube", {}).get("schedule", {})
+            schedule["start_time"] = start_time
+            schedule["interval_minutes"] = interval
+            schedule["count"] = count
+            self.config["youtube"]["schedule"] = schedule
+            self.publish_time_entry.delete(0, "end")
+            self.publish_time_entry.insert(0, start_time)
+            self.publish_interval_entry.delete(0, "end")
+            self.publish_interval_entry.insert(0, str(interval))
+            self.publish_count_entry.delete(0, "end")
+            self.publish_count_entry.insert(0, str(count))
+            self.save_config()
+            await m.answer(f"✅ Расписание сохранено: {start_time}, каждые {interval} мин, всего {count}.")
+
+        @dp.message(F.text == "/stats")
+        async def cmd_stats(m: types.Message):
+            stats_text = self.format_stats()
+            await m.answer(stats_text)
 
         @dp.message(F.text == "⏹ ОСТАНОВИТЬ")
         async def cmd_stop(m: types.Message):
             self.active_sessions[m.from_user.id] = False
             await m.answer("🛑 Останавливаю конвейер...")
+
+        @dp.message(F.text == "🎲 РАНДОМ")
+        async def cmd_random(m: types.Message):
+            if not self.config["topics"]:
+                await m.answer("Список тем пуст.")
+                return
+            topic = random.choice(self.config["topics"])
+            await m.answer(f"🎲 Случайная тема: {topic}")
+            m.text = topic
+            await handle_loop(m)
 
         @dp.message()
         async def handle_loop(message: types.Message):
@@ -649,6 +721,7 @@ class SoraApp(ctk.CTk):
                                 dest,
                                 f"✅ Готово! Видео успешно обработано.\nТема: {topic}",
                             )
+                            self.record_video_stat(topic)
 
                             await worker.wait_for_youtube_publish(
                                 youtube_id,
@@ -673,6 +746,38 @@ class SoraApp(ctk.CTk):
 
         logging.info("Бот запущен и ожидает команд...")
         await dp.start_polling(bot)
+
+    def format_stats(self):
+        now = datetime.now(timezone.utc)
+        today_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        week_start = now - timedelta(days=7)
+
+        def summarize(since=None):
+            counts = {}
+            for entry in self.stats.get("videos", []):
+                try:
+                    ts = datetime.fromisoformat(entry["timestamp"])
+                except Exception:
+                    continue
+                if since and ts < since:
+                    continue
+                topic = entry.get("topic", "unknown")
+                counts[topic] = counts.get(topic, 0) + 1
+            total = sum(counts.values())
+            lines = [f"Всего: {total}"]
+            for topic, count in sorted(counts.items(), key=lambda x: x[1], reverse=True):
+                lines.append(f"- {topic}: {count}")
+            return "\n".join(lines) if lines else "Нет данных."
+
+        all_time = summarize()
+        today = summarize(today_start)
+        week = summarize(week_start)
+        return (
+            "📊 Статистика публикаций\n\n"
+            f"За все время:\n{all_time}\n\n"
+            f"За неделю:\n{week}\n\n"
+            f"За сегодня:\n{today}"
+        )
 
 if __name__ == "__main__":
     app = SoraApp()
