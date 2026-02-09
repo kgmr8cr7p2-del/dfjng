@@ -767,8 +767,9 @@ class SoraApp(ctk.CTk):
                             self.active_sessions[user_id] = False
                             break
 
-                    if not self.active_sessions.get(user_id): break
-                    await asyncio.sleep(10)
+                        if not self.active_sessions.get(user_id):
+                            break
+                        await asyncio.sleep(10)
                 except Exception as e:
                     logging.error(f"Браузер Error: {e}")
 
