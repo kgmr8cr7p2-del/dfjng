@@ -644,15 +644,13 @@ class SoraApp(ctk.CTk):
                 return
             topic = random.choice(self.config["topics"])
             await m.answer(f"🎲 Случайная тема: {topic}")
-            m.text = topic
-            await handle_loop(m)
+            await start_topic_pipeline(m, topic)
 
-        @dp.message()
-        async def handle_loop(message: types.Message):
-            if message.text not in self.config["topics"] or not self.bot_running: return
+        async def start_topic_pipeline(message: types.Message, topic: str):
+            if topic not in self.config["topics"] or not self.bot_running:
+                return
             
             user_id = message.from_user.id
-            topic = message.text
             self.active_sessions[user_id] = True
             dest = self.config["target_chat_id"] if self.config["target_chat_id"] else message.chat.id
             
@@ -769,11 +767,16 @@ class SoraApp(ctk.CTk):
                             self.active_sessions[user_id] = False
                             break
 
-                        if not self.active_sessions.get(user_id): break
-                        await asyncio.sleep(10)
+                    if not self.active_sessions.get(user_id): break
+                    await asyncio.sleep(10)
                 except Exception as e:
                     logging.error(f"Браузер Error: {e}")
 
+        @dp.message()
+        async def handle_loop(message: types.Message):
+            if message.text not in self.config["topics"] or not self.bot_running:
+                return
+            await start_topic_pipeline(message, message.text)
         logging.info("Бот запущен и ожидает команд...")
         await dp.start_polling(bot)
 
