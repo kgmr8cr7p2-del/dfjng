@@ -237,8 +237,7 @@ class SoraWorker:
 
             caption_template = tiktok_config.get("caption_template", "{static}\n\n{prompt_text}")
             caption = self._build_description(topic, prompt, prompt_mode, caption_template)
-            if tiktok_config.get("append_hashtags", True):
-                caption = f"{caption}\n#shorts #fyp"
+            tags = ["#shorts", "#fyp"] if tiktok_config.get("append_hashtags", True) else []
 
             caption_box = page.locator(
                 'div.caption-editor [contenteditable="true"][role="combobox"]'
@@ -248,6 +247,9 @@ class SoraWorker:
             await page.keyboard.press("Control+A")
             await page.keyboard.press("Backspace")
             await caption_box.fill(caption)
+            for tag in tags:
+                await page.keyboard.type(f" {tag}")
+                await page.keyboard.press("Enter")
 
             post_button = page.locator('button[data-e2e="post_video_button"]').first
             await post_button.wait_for(state="visible", timeout=90000)
