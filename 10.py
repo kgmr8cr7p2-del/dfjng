@@ -790,58 +790,64 @@ class SoraApp(ctk.CTk):
                         random.shuffle(cycle_topics)
 
                     while self.active_sessions.get(user_id) and self.bot_running:
-                        # Создаем сообщение прогресса
-                        status_msg = await self.safe_send_message(bot, dest, "🎬 Начало цикла...")
-                        dest = status_msg.chat.id
-                        worker = SoraWorker(page, status_msg, bot, dest)
+                        try:
+                            # Создаем сообщение прогресса
+                            status_msg = await self.safe_send_message(bot, dest, "🎬 Начало цикла...")
+                            dest = status_msg.chat.id
+                            worker = SoraWorker(page, status_msg, bot, dest)
 
-                        # 1. ChatGPT
-                        if rotate_topics and cycle_topics:
-                            topic = cycle_topics.pop(0)
-                            cycle_topics.append(topic)
-                            await self.safe_send_message(bot, dest, f"🧭 Новая тема: {topic}")
+                            # 1. ChatGPT
+                            if rotate_topics and cycle_topics:
+                                topic = cycle_topics.pop(0)
+                                cycle_topics.append(topic)
+                                await self.safe_send_message(bot, dest, f"🧭 Новая тема: {topic}")
 
-                        if series_size > 1:
-                            series_prompts = await worker.get_series_prompts(topic, series_size, storyline=storyline)
-                        else:
-                            single_prompt = await worker.get_smart_prompt(topic)
-                            series_prompts = [single_prompt] if single_prompt else []
+                            series_prompts = None
+                            for attempt in range(1, 4):
+                                if series_size > 1:
+                                    series_prompts = await worker.get_series_prompts(
+                                        topic,
+                                        series_size,
+                                        storyline=storyline,
+                                    )
+                                else:
+                                    single_prompt = await worker.get_smart_prompt(topic)
+                                    series_prompts = [single_prompt] if single_prompt else []
+                                if series_prompts:
+                                    break
+                                await self.safe_send_message(
+                                    dest=dest,
+                                    bot=bot,
+                                    text=f"❌ Ошибка ChatGPT (попытка {attempt}/3). Повтор...",
+                                )
+                                await asyncio.sleep(10)
 
-                        if not series_prompts:
-                            await self.safe_send_message(dest=dest, bot=bot, text="❌ Ошибка ChatGPT. Повтор...")
-                            await asyncio.sleep(20)
-                            continue
-
-                        # 2. Sora (генерация серии роликов)
-                        video_files = []
-                        for prompt in series_prompts:
-                            if not prompt:
+                            if not series_prompts:
+                                await asyncio.sleep(20)
                                 continue
-                            video_file = await worker.run_sora(prompt)
-                            if video_file and os.path.exists(video_file):
-                                video_files.append(video_file)
-                            else:
-                                await self.safe_send_message(bot, dest, "❌ Sora не отдала файл.")
-                                break
 
-                        if len(video_files) != len(series_prompts):
-                            for path in video_files:
-                                try:
-                                    os.remove(path)
-                                except OSError:
-                                    pass
-                            await asyncio.sleep(10)
-                            continue
+                            # 2. Sora (генерация серии роликов)
+                            video_files = []
+                            for prompt in series_prompts:
+                                if not prompt:
+                                    continue
+                                video_file = None
+                                for attempt in range(1, 3):
+                                    video_file = await worker.run_sora(prompt)
+                                    if video_file and os.path.exists(video_file):
+                                        break
+                                    await self.safe_send_message(
+                                        bot,
+                                        dest,
+                                        f"❌ Sora не отдала файл (попытка {attempt}/2).",
+                                    )
+                                    await asyncio.sleep(10)
+                                if video_file and os.path.exists(video_file):
+                                    video_files.append(video_file)
+                                else:
+                                    break
 
-                        final_video = video_files[0]
-                        combined_prompt = " | ".join(series_prompts)
-                        if combine_series and len(video_files) > 1:
-                            final_video, concat_error = self.concat_videos(video_files)
-                            if not final_video:
-                                message = "❌ Не удалось объединить видео."
-                                if concat_error:
-                                    message = f"{message}\n\n{concat_error}"
-                                await self.safe_send_message(bot, dest, message)
+                            if len(video_files) != len(series_prompts):
                                 for path in video_files:
                                     try:
                                         os.remove(path)
@@ -850,70 +856,97 @@ class SoraApp(ctk.CTk):
                                 await asyncio.sleep(10)
                                 continue
 
-                        if final_video and os.path.exists(final_video):
-                            youtube_id = None
-                            try:
-                                scheduled_publish_at = None
-                                scheduled_publish_at_dt = None
-                                if schedule_active and remaining_uploads > 0:
-                                    scheduled_publish_at_dt = publish_at
-                                    scheduled_publish_at = publish_at.isoformat(timespec="seconds")
-                                    publish_at += timedelta(minutes=interval_minutes)
-                                    remaining_uploads -= 1
-                                    logging.info(
-                                        "YouTube расписание: поставлено на публикацию %s.",
-                                        scheduled_publish_at,
+                            final_video = video_files[0]
+                            combined_prompt = " | ".join(series_prompts)
+                            if combine_series and len(video_files) > 1:
+                                final_video, concat_error = self.concat_videos(video_files)
+                                if not final_video:
+                                    message = "❌ Не удалось объединить видео."
+                                    if concat_error:
+                                        message = f"{message}\n\n{concat_error}"
+                                    await self.safe_send_message(bot, dest, message)
+                                    for path in video_files:
+                                        try:
+                                            os.remove(path)
+                                        except OSError:
+                                            pass
+                                    await asyncio.sleep(10)
+                                    continue
+
+                            if final_video and os.path.exists(final_video):
+                                youtube_id = None
+                                try:
+                                    scheduled_publish_at = None
+                                    scheduled_publish_at_dt = None
+                                    if schedule_active and remaining_uploads > 0:
+                                        scheduled_publish_at_dt = publish_at
+                                        scheduled_publish_at = publish_at.isoformat(timespec="seconds")
+                                        publish_at += timedelta(minutes=interval_minutes)
+                                        remaining_uploads -= 1
+                                        logging.info(
+                                            "YouTube расписание: поставлено на публикацию %s.",
+                                            scheduled_publish_at,
+                                        )
+                                    youtube_id = await worker.upload_to_youtube(
+                                        final_video,
+                                        topic,
+                                        combined_prompt,
+                                        self.config.get("youtube", {}),
+                                        publish_at=scheduled_publish_at,
                                     )
-                                youtube_id = await worker.upload_to_youtube(
+                                except Exception as e:
+                                    logging.error(f"YouTube upload error: {e}")
+
+                                await worker.upload_to_tiktok(
                                     final_video,
                                     topic,
                                     combined_prompt,
-                                    self.config.get("youtube", {}),
-                                    publish_at=scheduled_publish_at,
+                                    self.config.get("tiktok", {}),
+                                    self.config.get("tiktok", {}).get("prompt_mode", {}),
                                 )
-                            except Exception as e:
-                                logging.error(f"YouTube upload error: {e}")
+                                await worker.update_status("Готово! Отправка...", 100)
+                                await self.safe_send_message(
+                                    bot,
+                                    dest,
+                                    f"✅ Готово! Видео успешно обработано.\nТема: {topic}",
+                                )
+                                self.record_video_stat(topic)
 
-                            await worker.upload_to_tiktok(
-                                final_video,
-                                topic,
-                                combined_prompt,
-                                self.config.get("tiktok", {}),
-                                self.config.get("tiktok", {}).get("prompt_mode", {}),
-                            )
-                            await worker.update_status("Готово! Отправка...", 100)
+                                await worker.wait_for_youtube_publish(
+                                    youtube_id,
+                                    self.config.get("youtube", {}),
+                                    scheduled_publish_at_dt,
+                                )
+
+                                os.remove(final_video)
+                                if final_video != video_files[0]:
+                                    for path in video_files:
+                                        try:
+                                            os.remove(path)
+                                        except OSError:
+                                            pass
+                                try:
+                                    await bot.delete_message(status_msg.chat.id, status_msg.message_id)
+                                except Exception:
+                                    pass
+                            else:
+                                await self.safe_send_message(bot, dest, "❌ Финальный файл не найден.")
+
+                            if schedule_active and remaining_uploads == 0:
+                                self.active_sessions[user_id] = False
+                                break
+
+                            if not self.active_sessions.get(user_id):
+                                break
+                            await asyncio.sleep(10)
+                        except Exception as e:
+                            logging.error("Ошибка цикла: %s", e)
                             await self.safe_send_message(
                                 bot,
                                 dest,
-                                f"✅ Готово! Видео успешно обработано.\nТема: {topic}",
+                                f"⚠️ Ошибка цикла: {e}. Продолжаю работу.",
                             )
-                            self.record_video_stat(topic)
-
-                            await worker.wait_for_youtube_publish(
-                                youtube_id,
-                                self.config.get("youtube", {}),
-                                scheduled_publish_at_dt,
-                            )
-
-                            os.remove(final_video)
-                            if final_video != video_files[0]:
-                                for path in video_files:
-                                    try:
-                                        os.remove(path)
-                                    except OSError:
-                                        pass
-                            try: await bot.delete_message(status_msg.chat.id, status_msg.message_id)
-                            except: pass
-                        else:
-                            await self.safe_send_message(bot, dest, "❌ Финальный файл не найден.")
-
-                        if schedule_active and remaining_uploads == 0:
-                            self.active_sessions[user_id] = False
-                            break
-
-                        if not self.active_sessions.get(user_id):
-                            break
-                        await asyncio.sleep(10)
+                            await asyncio.sleep(10)
                 except Exception as e:
                     logging.error(f"Браузер Error: {e}")
 
