@@ -34,3 +34,11 @@
 - остальные 80% получают короткий prompt-summary
 - `summary_max_chars` — длина краткого описания
 - `static_description` — статическое описание, добавляется ко всем роликам
+
+### TikTok автопубликация
+
+В `config.json` добавлен блок `tiktok`. При `enabled: true` бот пытается загрузить ролик через веб-интерфейс TikTok (нужна активная сессия входа в браузере).
+
+- `caption_template` — шаблон описания (поддерживает `{static}`, `{prompt_text}`)
+- `append_hashtags` — добавляет `#shorts #fyp`
+- `prompt_mode` — те же параметры 80/20, что и для YouTube

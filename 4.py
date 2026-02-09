@@ -161,19 +161,12 @@ class SoraWorker:
             description_template = youtube_config.get("description_template", "{static}\n\n{prompt_text}")
             title = title_template.format(topic=topic, prompt=prompt)
 
-            prompt_mode = youtube_config.get("prompt_mode", {})
-            full_ratio = float(prompt_mode.get("full_prompt_ratio", 0.2))
-            summary_limit = int(prompt_mode.get("summary_max_chars", 140))
-            static_description = prompt_mode.get("static_description", "")
-            use_full_prompt = random.random() < full_ratio
-            prompt_text = prompt if use_full_prompt else self._summarize_prompt(prompt, summary_limit)
-
-            description = description_template.format(
-                topic=topic,
-                prompt=prompt,
-                prompt_text=prompt_text,
-                static=static_description,
-            ).strip()
+            description = self._build_description(
+                topic,
+                prompt,
+                youtube_config.get("prompt_mode", {}),
+                description_template,
+            )
             if youtube_config.get("append_shorts_tag", True):
                 description = f"{description}\n\n#shorts"
                 if "#shorts" not in title.lower():
@@ -214,11 +207,60 @@ class SoraWorker:
         logging.info("YouTube: загрузка завершена.")
         return video_id
 
+    async def upload_to_tiktok(self, video_file, topic, prompt, tiktok_config, prompt_mode):
+        if not tiktok_config.get("enabled"):
+            return False
+
+        await self.update_status("Загрузка на TikTok...", 98)
+        logging.info("TikTok: начинаю загрузку файла.")
+
+        page = await self.page.context.new_page()
+        try:
+            await page.goto("https://www.tiktok.com/upload?lang=en", timeout=60000)
+            file_input = page.locator('input[type="file"]').first
+            await file_input.set_input_files(video_file)
+
+            caption_template = tiktok_config.get("caption_template", "{static}\n\n{prompt_text}")
+            caption = self._build_description(topic, prompt, prompt_mode, caption_template)
+            if tiktok_config.get("append_hashtags", True):
+                caption = f"{caption}\n#shorts #fyp"
+
+            caption_box = page.locator('textarea[placeholder]').first
+            await caption_box.wait_for(state="visible", timeout=60000)
+            await caption_box.fill(caption)
+
+            post_button = page.locator('button:has-text("Post"), button:has-text("Publish")').first
+            await post_button.wait_for(state="visible", timeout=60000)
+            await post_button.click()
+
+            success_text = page.locator('text=Your video is being uploaded')
+            await success_text.wait_for(timeout=60000)
+            logging.info("TikTok: загрузка завершена.")
+            return True
+        except Exception as e:
+            logging.error(f"TikTok upload error: {e}")
+            return False
+        finally:
+            await page.close()
+
     def _summarize_prompt(self, prompt, limit):
         cleaned = " ".join(prompt.split())
         if len(cleaned) <= limit:
             return cleaned
         return cleaned[: max(0, limit - 1)].rstrip() + "…"
+
+    def _build_description(self, topic, prompt, prompt_mode, template):
+        full_ratio = float(prompt_mode.get("full_prompt_ratio", 0.2))
+        summary_limit = int(prompt_mode.get("summary_max_chars", 140))
+        static_description = prompt_mode.get("static_description", "")
+        use_full_prompt = random.random() < full_ratio
+        prompt_text = prompt if use_full_prompt else self._summarize_prompt(prompt, summary_limit)
+        return template.format(
+            topic=topic,
+            prompt=prompt,
+            prompt_text=prompt_text,
+            static=static_description,
+        ).strip()
 
     async def wait_for_youtube_publish(self, video_id, youtube_config, publish_at_dt=None):
         if not youtube_config.get("enabled") or not video_id:
@@ -352,12 +394,27 @@ class SoraApp(ctk.CTk):
                     "count": 0,
                 },
             },
+            "tiktok": {
+                "enabled": False,
+                "caption_template": "{static}\n\n{prompt_text}",
+                "append_hashtags": True,
+                "prompt_mode": {
+                    "full_prompt_ratio": 0.2,
+                    "summary_max_chars": 140,
+                    "static_description": "AI video from Sora2.",
+                },
+            },
         }
         if os.path.exists("config.json"):
             with open("config.json", "r", encoding="utf-8") as f:
                 self.config = json.load(f)
                 merged = {**defaults, **self.config}
                 merged["youtube"] = {**defaults["youtube"], **self.config.get("youtube", {})}
+                merged["tiktok"] = {**defaults["tiktok"], **self.config.get("tiktok", {})}
+                merged["tiktok"]["prompt_mode"] = {
+                    **defaults["tiktok"]["prompt_mode"],
+                    **self.config.get("tiktok", {}).get("prompt_mode", {}),
+                }
                 self.config = merged
                 self.token_entry.insert(0, self.config.get("bot_token", ""))
                 self.chat_entry.insert(0, self.config.get("target_chat_id", ""))
@@ -391,6 +448,7 @@ class SoraApp(ctk.CTk):
                 **self.config.get("youtube", {}),
                 "schedule": schedule,
             },
+            "tiktok": self.config.get("tiktok", {}),
         }
         with open("config.json", "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=4, ensure_ascii=False)
@@ -522,17 +580,27 @@ class SoraApp(ctk.CTk):
                                 types.FSInputFile(video_file), 
                                 caption=f"✅ Тема: {topic}\n📝 Промт: {prompt}"
                             )
+                            tiktok_ok = await worker.upload_to_tiktok(
+                                video_file,
+                                topic,
+                                prompt,
+                                self.config.get("tiktok", {}),
+                                self.config.get("tiktok", {}).get("prompt_mode", {}),
+                            )
+                            if tiktok_ok:
+                                await bot.send_message(dest, "🎵 Видео опубликовано в TikTok.")
                             if youtube_id:
                                 await bot.send_message(dest, f"📺 Загружено на YouTube: https://youtu.be/{youtube_id}")
-                            os.remove(video_file)
-                            try: await bot.delete_message(dest, status_msg.message_id)
-                            except: pass
 
                             await worker.wait_for_youtube_publish(
                                 youtube_id,
                                 self.config.get("youtube", {}),
                                 scheduled_publish_at_dt,
                             )
+
+                            os.remove(video_file)
+                            try: await bot.delete_message(dest, status_msg.message_id)
+                            except: pass
                         else:
                             await bot.send_message(dest, "❌ Sora не отдала файл.")
 
