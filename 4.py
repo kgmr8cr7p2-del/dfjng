@@ -542,7 +542,17 @@ class SoraApp(ctk.CTk):
 
             async with async_playwright() as p:
                 try:
-                    browser = await p.chromium.connect_over_cdp("http://localhost:9222")
+                    browser = None
+                    for attempt in range(1, 4):
+                        try:
+                            browser = await p.chromium.connect_over_cdp("http://localhost:9222", timeout=60000)
+                            break
+                        except Exception as e:
+                            logging.error(f"Браузер Error (connect attempt {attempt}/3): {e}")
+                            await asyncio.sleep(5)
+                    if not browser:
+                        await self.safe_send_message(bot, dest, "❌ Не удалось подключиться к браузеру.")
+                        return
                     context = browser.contexts[0]
                     page = context.pages[0] if context.pages else await context.new_page()
                     
