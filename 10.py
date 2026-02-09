@@ -12,7 +12,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 import customtkinter as ctk
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.exceptions import TelegramMigrateToChat
+from aiogram.exceptions import TelegramMigrateToChat, TelegramNetworkError
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -923,7 +923,18 @@ class SoraApp(ctk.CTk):
                 return
             await start_topic_pipeline(message, message.text)
         logging.info("Бот запущен и ожидает команд...")
-        await dp.start_polling(bot)
+        retry_delay = 1.0
+        while self.bot_running:
+            try:
+                await dp.start_polling(bot)
+                break
+            except TelegramNetworkError as e:
+                logging.warning("TelegramNetworkError: %s. Повтор через %.1f сек.", e, retry_delay)
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 30.0)
+            except Exception as e:
+                logging.error("Ошибка polling: %s", e)
+                await asyncio.sleep(5)
 
     def format_stats(self):
         now = datetime.now(timezone.utc)
