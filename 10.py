@@ -720,8 +720,17 @@ class SoraApp(ctk.CTk):
             await m.answer(f"🎲 Случайная тема: {topic}")
             await start_topic_pipeline(m, topic, topic_cycle=self.config["topics"])
 
-        async def start_topic_pipeline(message: types.Message, topic: str, topic_cycle=None):
-            if topic not in self.config["topics"] or not self.bot_running:
+        @dp.message(F.text.startswith("/topic"))
+        async def cmd_custom_topic(m: types.Message):
+            raw_topic = m.text.replace("/topic", "", 1).strip()
+            if not raw_topic:
+                await m.answer("Введите тему после команды. Пример: /topic Три разных двигателя...")
+                return
+            await m.answer(f"📝 Пользовательская тема: {raw_topic}")
+            await start_topic_pipeline(m, raw_topic, allow_any=True)
+
+        async def start_topic_pipeline(message: types.Message, topic: str, topic_cycle=None, allow_any=False):
+            if (not allow_any and topic not in self.config["topics"]) or not self.bot_running:
                 return
             
             user_id = message.from_user.id
