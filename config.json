@@ -18,8 +18,13 @@
         "refresh_token": "",
         "token_uri": "https://oauth2.googleapis.com/token",
         "title_template": "Sora2 | {topic}",
-        "description_template": "Prompt: {prompt}",
+        "description_template": "{static}\n\n{prompt_text}",
         "append_shorts_tag": true,
+        "prompt_mode": {
+            "full_prompt_ratio": 0.2,
+            "summary_max_chars": 140,
+            "static_description": "AI video from Sora2."
+        },
         "tags": [
             "sora2",
             "sora",

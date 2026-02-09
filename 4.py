@@ -4,6 +4,7 @@ import json
 import threading
 import logging
 import time
+import random
 from datetime import datetime, timedelta
 import customtkinter as ctk
 from aiogram import Bot, Dispatcher, types, F
@@ -157,9 +158,22 @@ class SoraWorker:
             youtube = build("youtube", "v3", credentials=credentials)
 
             title_template = youtube_config.get("title_template", "Sora2 | {topic}")
-            description_template = youtube_config.get("description_template", "Prompt: {prompt}")
+            description_template = youtube_config.get("description_template", "{static}\n\n{prompt_text}")
             title = title_template.format(topic=topic, prompt=prompt)
-            description = description_template.format(topic=topic, prompt=prompt)
+
+            prompt_mode = youtube_config.get("prompt_mode", {})
+            full_ratio = float(prompt_mode.get("full_prompt_ratio", 0.2))
+            summary_limit = int(prompt_mode.get("summary_max_chars", 140))
+            static_description = prompt_mode.get("static_description", "")
+            use_full_prompt = random.random() < full_ratio
+            prompt_text = prompt if use_full_prompt else self._summarize_prompt(prompt, summary_limit)
+
+            description = description_template.format(
+                topic=topic,
+                prompt=prompt,
+                prompt_text=prompt_text,
+                static=static_description,
+            ).strip()
             if youtube_config.get("append_shorts_tag", True):
                 description = f"{description}\n\n#shorts"
                 if "#shorts" not in title.lower():
@@ -199,6 +213,12 @@ class SoraWorker:
         video_id = await asyncio.to_thread(do_upload)
         logging.info("YouTube: загрузка завершена.")
         return video_id
+
+    def _summarize_prompt(self, prompt, limit):
+        cleaned = " ".join(prompt.split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[: max(0, limit - 1)].rstrip() + "…"
 
     async def wait_for_youtube_publish(self, video_id, youtube_config, publish_at_dt=None):
         if not youtube_config.get("enabled") or not video_id:
@@ -315,8 +335,13 @@ class SoraApp(ctk.CTk):
                 "refresh_token": "",
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "title_template": "Sora2 | {topic}",
-                "description_template": "Prompt: {prompt}",
+                "description_template": "{static}\n\n{prompt_text}",
                 "append_shorts_tag": True,
+                "prompt_mode": {
+                    "full_prompt_ratio": 0.2,
+                    "summary_max_chars": 140,
+                    "static_description": "AI video from Sora2.",
+                },
                 "tags": ["sora2", "sora", "ai video"],
                 "category_id": "22",
                 "privacy_status": "public",
