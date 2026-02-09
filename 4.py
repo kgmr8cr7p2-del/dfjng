@@ -8,6 +8,7 @@ import random
 from datetime import datetime, timedelta
 import customtkinter as ctk
 from aiogram import Bot, Dispatcher, types, F
+from aiogram.exceptions import TelegramMigrateToChat
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -454,6 +455,28 @@ class SoraApp(ctk.CTk):
             json.dump(self.config, f, indent=4, ensure_ascii=False)
         logging.info("Конфигурация сохранена.")
 
+    def update_target_chat_id(self, new_chat_id):
+        self.config["target_chat_id"] = str(new_chat_id)
+        self.chat_entry.delete(0, "end")
+        self.chat_entry.insert(0, str(new_chat_id))
+        with open("config.json", "w", encoding="utf-8") as f:
+            json.dump(self.config, f, indent=4, ensure_ascii=False)
+        logging.info("Обновлен target_chat_id: %s", new_chat_id)
+
+    async def safe_send_message(self, bot, chat_id, text, **kwargs):
+        try:
+            return await bot.send_message(chat_id, text, **kwargs)
+        except TelegramMigrateToChat as e:
+            self.update_target_chat_id(e.migrate_to_chat_id)
+            return await bot.send_message(e.migrate_to_chat_id, text, **kwargs)
+
+    async def safe_send_video(self, bot, chat_id, video, **kwargs):
+        try:
+            return await bot.send_video(chat_id, video, **kwargs)
+        except TelegramMigrateToChat as e:
+            self.update_target_chat_id(e.migrate_to_chat_id)
+            return await bot.send_video(e.migrate_to_chat_id, video, **kwargs)
+
     def start_bot(self):
         self.save_config()
         if not self.config["bot_token"]:
@@ -537,13 +560,14 @@ class SoraApp(ctk.CTk):
 
                     while self.active_sessions.get(user_id) and self.bot_running:
                         # Создаем сообщение прогресса
-                        status_msg = await bot.send_message(dest, "🎬 Начало цикла...")
+                        status_msg = await self.safe_send_message(bot, dest, "🎬 Начало цикла...")
+                        dest = status_msg.chat.id
                         worker = SoraWorker(page, status_msg, bot, dest)
                         
                         # 1. ChatGPT
                         prompt = await worker.get_smart_prompt(topic)
                         if not prompt:
-                            await bot.send_message(dest, "❌ Ошибка ChatGPT. Повтор...")
+                            await self.safe_send_message(dest=dest, bot=bot, text="❌ Ошибка ChatGPT. Повтор...")
                             await asyncio.sleep(20)
                             continue
                             
@@ -575,10 +599,11 @@ class SoraApp(ctk.CTk):
                                 logging.error(f"YouTube upload error: {e}")
 
                             await worker.update_status("Готово! Отправка...", 100)
-                            await bot.send_video(
-                                dest, 
-                                types.FSInputFile(video_file), 
-                                caption=f"✅ Тема: {topic}\n📝 Промт: {prompt}"
+                            await self.safe_send_video(
+                                bot,
+                                dest,
+                                types.FSInputFile(video_file),
+                                caption=f"✅ Тема: {topic}\n📝 Промт: {prompt}",
                             )
                             tiktok_ok = await worker.upload_to_tiktok(
                                 video_file,
@@ -588,9 +613,9 @@ class SoraApp(ctk.CTk):
                                 self.config.get("tiktok", {}).get("prompt_mode", {}),
                             )
                             if tiktok_ok:
-                                await bot.send_message(dest, "🎵 Видео опубликовано в TikTok.")
+                                await self.safe_send_message(bot, dest, "🎵 Видео опубликовано в TikTok.")
                             if youtube_id:
-                                await bot.send_message(dest, f"📺 Загружено на YouTube: https://youtu.be/{youtube_id}")
+                                await self.safe_send_message(bot, dest, f"📺 Загружено на YouTube: https://youtu.be/{youtube_id}")
 
                             await worker.wait_for_youtube_publish(
                                 youtube_id,
@@ -599,10 +624,10 @@ class SoraApp(ctk.CTk):
                             )
 
                             os.remove(video_file)
-                            try: await bot.delete_message(dest, status_msg.message_id)
+                            try: await bot.delete_message(status_msg.chat.id, status_msg.message_id)
                             except: pass
                         else:
-                            await bot.send_message(dest, "❌ Sora не отдала файл.")
+                            await self.safe_send_message(bot, dest, "❌ Sora не отдала файл.")
 
                         if schedule_active and remaining_uploads == 0:
                             self.active_sessions[user_id] = False
