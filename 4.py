@@ -245,6 +245,8 @@ class SoraWorker:
             ).first
             await caption_box.wait_for(state="visible", timeout=90000)
             await caption_box.click()
+            await page.keyboard.press("Control+A")
+            await page.keyboard.press("Backspace")
             await caption_box.fill(caption)
 
             post_button = page.locator('button[data-e2e="post_video_button"]').first
