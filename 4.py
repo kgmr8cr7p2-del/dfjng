@@ -229,7 +229,9 @@ class SoraWorker:
         await self.update_status("Загрузка на TikTok...", 98)
         logging.info("TikTok: начинаю загрузку файла.")
 
-        page = await self.page.context.new_page()
+        browser = self.page.context.browser
+        context = await browser.new_context()
+        page = await context.new_page()
         try:
             await page.goto("https://www.tiktok.com/upload?lang=en", timeout=60000)
             file_input = page.locator('input[type="file"]').first
@@ -267,7 +269,7 @@ class SoraWorker:
             logging.error(f"TikTok upload error: {e}")
             return False
         finally:
-            await page.close()
+            await context.close()
 
     def _summarize_prompt(self, prompt, limit):
         cleaned = " ".join(prompt.split())
