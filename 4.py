@@ -20,6 +20,7 @@ class TextHandler(logging.Handler):
     def __init__(self, text_widget):
         super().__init__()
         self.text_widget = text_widget
+        self.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", "%H:%M:%S"))
 
     def emit(self, record):
         msg = self.format(record)
@@ -46,9 +47,10 @@ class SoraWorker:
 
     async def update_status(self, text, percent):
         """Редактирует сообщение в Telegram с прогресс-баром."""
+        timestamp = datetime.now().strftime("%H:%M:%S")
         bar = get_progress_bar(percent)
-        new_text = f"⏳ **Прогресс:**\n{bar}\n📍 {text}"
-        logging.info(f"Статус: {percent}% - {text}")
+        new_text = f"⏳ **Прогресс:**\n{bar}\n📍 {text}\n🕒 {timestamp}"
+        logging.info(f"Статус: {percent}% - {text} ({timestamp})")
         try:
             await self.bot.edit_message_text(
                 chat_id=self.chat_id,
@@ -343,15 +345,15 @@ class SoraApp(ctk.CTk):
         self.sidebar.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
         ctk.CTkLabel(self.sidebar, text="НАСТРОЙКИ", font=("Arial", 20, "bold")).pack(pady=15)
-        
+        ctk.CTkLabel(self.sidebar, text="Telegram", font=("Arial", 14, "bold")).pack(pady=(5, 0))
         self.token_entry = self.create_input("Telegram Bot Token")
         self.chat_entry = self.create_input("Target Chat ID (Optional)")
         
-        ctk.CTkLabel(self.sidebar, text="Темы кнопок:").pack(pady=(10, 0))
+        ctk.CTkLabel(self.sidebar, text="Темы кнопок:", font=("Arial", 12, "bold")).pack(pady=(10, 0))
         self.topics_text = ctk.CTkTextbox(self.sidebar, height=250)
         self.topics_text.pack(fill="x", padx=10, pady=5)
 
-        ctk.CTkLabel(self.sidebar, text="YouTube расписание:").pack(pady=(10, 0))
+        ctk.CTkLabel(self.sidebar, text="YouTube расписание:", font=("Arial", 12, "bold")).pack(pady=(10, 0))
         self.publish_time_entry = self.create_input("Время 1-го видео (HH:MM)")
         self.publish_interval_entry = self.create_input("Периодичность (мин)")
         self.publish_count_entry = self.create_input("Сколько видео загрузить")
@@ -366,8 +368,15 @@ class SoraApp(ctk.CTk):
         self.stop_btn.pack(pady=5)
 
         # Окно логов
-        self.log_view = ctk.CTkTextbox(self, state="disabled", font=("Consolas", 12))
-        self.log_view.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+        self.log_panel = ctk.CTkFrame(self)
+        self.log_panel.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+        self.log_panel.grid_rowconfigure(1, weight=1)
+        self.log_panel.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(self.log_panel, text="ЛОГИ", font=("Arial", 16, "bold")).grid(
+            row=0, column=0, sticky="w", padx=10, pady=(5, 0)
+        )
+        self.log_view = ctk.CTkTextbox(self.log_panel, state="disabled", font=("Consolas", 12))
+        self.log_view.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
 
         self.load_config()
         logging.getLogger().addHandler(TextHandler(self.log_view))
