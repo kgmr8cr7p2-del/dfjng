@@ -562,10 +562,31 @@ class SoraApp(ctk.CTk):
         @dp.message(F.text == "/start")
         async def cmd_start(m: types.Message):
             builder = ReplyKeyboardBuilder()
-            for t in self.config["topics"]: builder.button(text=t)
+            builder.button(text="📂 ТЕМЫ")
             builder.button(text="🎲 РАНДОМ")
+            builder.button(text="📅 РАСПИСАНИЕ")
+            builder.button(text="📊 СТАТИСТИКА")
+            builder.button(text="🔁 ПЕРЕЗАПУСТИТЬ")
             builder.button(text="⏹ ОСТАНОВИТЬ")
+            await m.answer("Выберите действие:", reply_markup=builder.adjust(2).as_markup(resize_keyboard=True))
+
+        @dp.message(F.text == "📂 ТЕМЫ")
+        async def cmd_topics(m: types.Message):
+            builder = ReplyKeyboardBuilder()
+            for t in self.config["topics"]:
+                builder.button(text=t)
+            builder.button(text="🎲 РАНДОМ")
+            builder.button(text="↩️ НАЗАД")
             await m.answer("Выберите тему:", reply_markup=builder.adjust(2).as_markup(resize_keyboard=True))
+
+        @dp.message(F.text == "↩️ НАЗАД")
+        async def cmd_back(m: types.Message):
+            await cmd_start(m)
+
+        @dp.message(F.text == "🔁 ПЕРЕЗАПУСТИТЬ")
+        async def cmd_restart(m: types.Message):
+            await m.answer("🔁 Перезапуск бота...")
+            self.restart_bot()
 
         @dp.message(F.text.startswith("/schedule"))
         async def cmd_schedule(m: types.Message):
@@ -597,8 +618,17 @@ class SoraApp(ctk.CTk):
             self.save_config()
             await m.answer(f"✅ Расписание сохранено: {start_time}, каждые {interval} мин, всего {count}.")
 
+        @dp.message(F.text == "📅 РАСПИСАНИЕ")
+        async def cmd_schedule_button(m: types.Message):
+            await m.answer("Введите: /schedule HH:MM интервал_мин количество\nПример: /schedule 12:30 120 3")
+
         @dp.message(F.text == "/stats")
         async def cmd_stats(m: types.Message):
+            stats_text = self.format_stats()
+            await m.answer(stats_text)
+
+        @dp.message(F.text == "📊 СТАТИСТИКА")
+        async def cmd_stats_button(m: types.Message):
             stats_text = self.format_stats()
             await m.answer(stats_text)
 
