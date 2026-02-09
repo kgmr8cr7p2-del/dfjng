@@ -10,5 +10,22 @@
         "Tunnel + particles + beat-sync flashes",
         "Voronoi cells + displacement + strobe",
         "Fractal zoom + glow + subtle glitch"
-    ]
+    ],
+    "youtube": {
+        "enabled": false,
+        "client_id": "",
+        "client_secret": "",
+        "refresh_token": "",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "title_template": "Sora2 | {topic}",
+        "description_template": "Prompt: {prompt}",
+        "tags": [
+            "sora2",
+            "sora",
+            "ai video"
+        ],
+        "category_id": "22",
+        "privacy_status": "public",
+        "made_for_kids": false
+    }
 }
