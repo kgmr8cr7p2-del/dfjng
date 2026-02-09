@@ -251,6 +251,10 @@ class SoraWorker:
             await post_button.wait_for(state="visible", timeout=90000)
             await post_button.click()
 
+            confirm_button = page.locator('button:has-text("Опубликовать")').last
+            await confirm_button.wait_for(state="visible", timeout=90000)
+            await confirm_button.click()
+
             success_text = page.locator('text=Your video is being uploaded')
             await success_text.wait_for(timeout=90000)
             logging.info("TikTok: загрузка завершена.")
