@@ -4,9 +4,13 @@ import json
 import threading
 import logging
 import time
+from datetime import datetime, timedelta
 import customtkinter as ctk
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 from playwright.async_api import async_playwright
 
 # Настройка логирования для вывода в окно GUI
@@ -130,6 +134,65 @@ class SoraWorker:
             logging.error(f"Sora Error: {e}")
             return None
 
+    async def upload_to_youtube(self, video_file, topic, prompt, youtube_config, publish_at=None):
+        if not youtube_config.get("enabled"):
+            return None
+
+        await self.update_status("Загрузка на YouTube...", 98)
+
+        def do_upload():
+            required = ("client_id", "client_secret", "refresh_token")
+            if not all(youtube_config.get(key) for key in required):
+                raise ValueError("YouTube config missing client_id/client_secret/refresh_token.")
+
+            credentials = Credentials(
+                token=None,
+                refresh_token=youtube_config["refresh_token"],
+                token_uri=youtube_config.get("token_uri", "https://oauth2.googleapis.com/token"),
+                client_id=youtube_config["client_id"],
+                client_secret=youtube_config["client_secret"],
+                scopes=["https://www.googleapis.com/auth/youtube.upload"],
+            )
+            youtube = build("youtube", "v3", credentials=credentials)
+
+            title_template = youtube_config.get("title_template", "Sora2 | {topic}")
+            description_template = youtube_config.get("description_template", "Prompt: {prompt}")
+            title = title_template.format(topic=topic, prompt=prompt)
+            description = description_template.format(topic=topic, prompt=prompt)
+            if youtube_config.get("append_shorts_tag", True):
+                description = f"{description}\n\n#shorts"
+
+            snippet = {
+                "title": title[:95],
+                "description": description,
+                "categoryId": str(youtube_config.get("category_id", "22")),
+            }
+            tags = youtube_config.get("tags") or []
+            if tags:
+                snippet["tags"] = tags
+
+            status = {
+                "privacyStatus": youtube_config.get("privacy_status", "public"),
+                "selfDeclaredMadeForKids": bool(youtube_config.get("made_for_kids", False)),
+            }
+            if publish_at:
+                status["privacyStatus"] = "private"
+                status["publishAt"] = publish_at
+
+            media = MediaFileUpload(video_file, mimetype="video/mp4", resumable=True)
+            request = youtube.videos().insert(
+                part="snippet,status",
+                body={"snippet": snippet, "status": status},
+                media_body=media,
+            )
+
+            response = None
+            while response is None:
+                _, response = request.next_chunk()
+            return response.get("id")
+
+        return await asyncio.to_thread(do_upload)
+
 # --- ИНТЕРФЕЙС ГРАФИЧЕСКОГО ОКНА ---
 class SoraApp(ctk.CTk):
     def __init__(self):
@@ -158,6 +221,11 @@ class SoraApp(ctk.CTk):
         self.topics_text = ctk.CTkTextbox(self.sidebar, height=250)
         self.topics_text.pack(fill="x", padx=10, pady=5)
 
+        ctk.CTkLabel(self.sidebar, text="YouTube расписание:").pack(pady=(10, 0))
+        self.publish_time_entry = self.create_input("Время 1-го видео (HH:MM)")
+        self.publish_interval_entry = self.create_input("Периодичность (мин)")
+        self.publish_count_entry = self.create_input("Сколько видео загрузить")
+
         self.save_btn = ctk.CTkButton(self.sidebar, text="💾 СОХРАНИТЬ КОНФИГ", command=self.save_config, fg_color="#4A4A4A")
         self.save_btn.pack(pady=5)
 
@@ -181,22 +249,68 @@ class SoraApp(ctk.CTk):
         return entry
 
     def load_config(self):
+        defaults = {
+            "bot_token": "",
+            "target_chat_id": "",
+            "topics": ["Фракталы", "Киберпанк", "Жидкости"],
+            "youtube": {
+                "enabled": False,
+                "client_id": "",
+                "client_secret": "",
+                "refresh_token": "",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "title_template": "Sora2 | {topic}",
+                "description_template": "Prompt: {prompt}",
+                "append_shorts_tag": True,
+                "tags": ["sora2", "sora", "ai video"],
+                "category_id": "22",
+                "privacy_status": "public",
+                "made_for_kids": False,
+                "schedule": {
+                    "start_time": "",
+                    "interval_minutes": 0,
+                    "count": 0,
+                },
+            },
+        }
         if os.path.exists("config.json"):
             with open("config.json", "r", encoding="utf-8") as f:
                 self.config = json.load(f)
+                merged = {**defaults, **self.config}
+                merged["youtube"] = {**defaults["youtube"], **self.config.get("youtube", {})}
+                self.config = merged
                 self.token_entry.insert(0, self.config.get("bot_token", ""))
                 self.chat_entry.insert(0, self.config.get("target_chat_id", ""))
                 self.topics_text.insert("1.0", "\n".join(self.config.get("topics", [])))
+                schedule = self.config.get("youtube", {}).get("schedule", {})
+                self.publish_time_entry.insert(0, schedule.get("start_time", ""))
+                self.publish_interval_entry.insert(0, str(schedule.get("interval_minutes", "")))
+                self.publish_count_entry.insert(0, str(schedule.get("count", "")))
         else:
-            self.topics_text.insert("1.0", "Фракталы\nКиберпанк\nЖидкости")
+            self.config = defaults
+            self.topics_text.insert("1.0", "\n".join(self.config["topics"]))
             self.save_config()
 
     def save_config(self):
         topics = [t.strip() for t in self.topics_text.get("1.0", "end").split("\n") if t.strip()]
+        schedule = self.config.get("youtube", {}).get("schedule", {})
+        schedule["start_time"] = self.publish_time_entry.get().strip()
+        try:
+            schedule["interval_minutes"] = int(self.publish_interval_entry.get() or 0)
+        except ValueError:
+            schedule["interval_minutes"] = 0
+        try:
+            schedule["count"] = int(self.publish_count_entry.get() or 0)
+        except ValueError:
+            schedule["count"] = 0
         self.config = {
             "bot_token": self.token_entry.get(),
             "target_chat_id": self.chat_entry.get(),
-            "topics": topics
+            "topics": topics,
+            "youtube": {
+                **self.config.get("youtube", {}),
+                "schedule": schedule,
+            },
         }
         with open("config.json", "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=4, ensure_ascii=False)
@@ -259,6 +373,26 @@ class SoraApp(ctk.CTk):
                     context = browser.contexts[0]
                     page = context.pages[0] if context.pages else await context.new_page()
                     
+                    schedule_config = self.config.get("youtube", {}).get("schedule", {})
+                    publish_at = None
+                    remaining_uploads = schedule_config.get("count") or 0
+                    start_time = schedule_config.get("start_time", "")
+                    interval_minutes = schedule_config.get("interval_minutes") or 0
+                    if start_time:
+                        now = datetime.now().astimezone()
+                        try:
+                            start_hour, start_minute = map(int, start_time.split(":"))
+                            publish_at = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+                            if publish_at <= now:
+                                publish_at += timedelta(days=1)
+                        except ValueError:
+                            logging.error("Неверный формат времени публикации (ожидается HH:MM).")
+                            publish_at = None
+                    schedule_active = bool(publish_at and remaining_uploads > 0)
+                    if schedule_active and interval_minutes <= 0:
+                        logging.error("Периодичность публикации должна быть больше 0 минут.")
+                        interval_minutes = 1
+
                     while self.active_sessions.get(user_id) and self.bot_running:
                         # Создаем сообщение прогресса
                         status_msg = await bot.send_message(dest, "🎬 Начало цикла...")
@@ -275,17 +409,40 @@ class SoraApp(ctk.CTk):
                         video_file = await worker.run_sora(prompt)
                         
                         if video_file and os.path.exists(video_file):
+                            youtube_id = None
+                            try:
+                                scheduled_publish_at = None
+                                if schedule_active and remaining_uploads > 0:
+                                    scheduled_publish_at = publish_at.isoformat(timespec="seconds")
+                                    publish_at += timedelta(minutes=interval_minutes)
+                                    remaining_uploads -= 1
+                                youtube_id = await worker.upload_to_youtube(
+                                    video_file,
+                                    topic,
+                                    prompt,
+                                    self.config.get("youtube", {}),
+                                    publish_at=scheduled_publish_at,
+                                )
+                            except Exception as e:
+                                logging.error(f"YouTube upload error: {e}")
+
                             await worker.update_status("Готово! Отправка...", 100)
                             await bot.send_video(
                                 dest, 
                                 types.FSInputFile(video_file), 
                                 caption=f"✅ Тема: {topic}\n📝 Промт: {prompt}"
                             )
+                            if youtube_id:
+                                await bot.send_message(dest, f"📺 Загружено на YouTube: https://youtu.be/{youtube_id}")
                             os.remove(video_file)
                             try: await bot.delete_message(dest, status_msg.message_id)
                             except: pass
                         else:
                             await bot.send_message(dest, "❌ Sora не отдала файл.")
+
+                        if schedule_active and remaining_uploads == 0:
+                            self.active_sessions[user_id] = False
+                            break
 
                         if not self.active_sessions.get(user_id): break
                         await asyncio.sleep(10)
