@@ -1,0 +1,54 @@
+{
+  "bot_token": "",
+  "target_chat_id": "",
+  "topics": [
+    "Фракталы",
+    "Киберпанк",
+    "Жидкости"
+  ],
+  "youtube": {
+    "enabled": false,
+    "client_id": "",
+    "client_secret": "",
+    "refresh_token": "",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "title_template": "Sora2 | {topic}",
+    "description_template": "{static}\n\n{prompt_text}",
+    "append_shorts_tag": true,
+    "prompt_mode": {
+      "full_prompt_ratio": 0.2,
+      "summary_max_chars": 140,
+      "static_description": "AI video from Sora2."
+    },
+    "tags": [
+      "sora2",
+      "sora",
+      "ai video"
+    ],
+    "category_id": "22",
+    "privacy_status": "public",
+    "made_for_kids": false,
+    "schedule": {
+      "start_time": "",
+      "interval_minutes": 0,
+      "count": 0
+    }
+  },
+  "tiktok": {
+    "enabled": false,
+    "caption_template": "{static}\n\n{prompt_text}",
+    "append_hashtags": true,
+    "prompt_mode": {
+      "full_prompt_ratio": 0.2,
+      "summary_max_chars": 140,
+      "static_description": "AI video from Sora2."
+    }
+  },
+  "series": {
+    "size": 3,
+    "rotate_topics": false,
+    "shuffle_topics": true,
+    "combine": true,
+    "storyline": true
+  }
+}
