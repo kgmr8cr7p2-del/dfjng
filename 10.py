@@ -229,8 +229,7 @@ class SoraWorker:
         await self.update_status("Загрузка на TikTok...", 98)
         logging.info("TikTok: начинаю загрузку файла.")
 
-        browser = self.page.context.browser
-        context = await browser.new_context()
+        context = self.page.context
         page = await context.new_page()
         try:
             await page.goto("https://www.tiktok.com/upload?lang=en", timeout=60000)
@@ -269,7 +268,7 @@ class SoraWorker:
             logging.error(f"TikTok upload error: {e}")
             return False
         finally:
-            await context.close()
+            await page.close()
 
     def _summarize_prompt(self, prompt, limit):
         cleaned = " ".join(prompt.split())
@@ -479,10 +478,11 @@ class SoraApp(ctk.CTk):
         with open("stats.json", "w", encoding="utf-8") as f:
             json.dump(self.stats, f, indent=2, ensure_ascii=False)
 
-    def record_video_stat(self, topic):
-        self.stats.setdefault("videos", []).append(
-            {"topic": topic, "timestamp": datetime.now(timezone.utc).isoformat()}
-        )
+    def record_video_stat(self, topic, youtube_id=None):
+        entry = {"topic": topic, "timestamp": datetime.now(timezone.utc).isoformat()}
+        if youtube_id:
+            entry["youtube_id"] = youtube_id
+        self.stats.setdefault("videos", []).append(entry)
         self.save_stats()
 
     def save_config(self):
@@ -755,7 +755,7 @@ class SoraApp(ctk.CTk):
                                 dest,
                                 f"✅ Готово! Видео успешно обработано.\nТема: {topic}",
                             )
-                            self.record_video_stat(topic)
+                            self.record_video_stat(topic, youtube_id=youtube_id)
 
                             await worker.wait_for_youtube_publish(
                                 youtube_id,
@@ -787,6 +787,43 @@ class SoraApp(ctk.CTk):
         logging.info("Бот запущен и ожидает команд...")
         await dp.start_polling(bot)
 
+    def fetch_youtube_view_stats(self):
+        youtube_config = self.config.get("youtube", {})
+        required = ("client_id", "client_secret", "refresh_token")
+        if not youtube_config.get("enabled") or not all(youtube_config.get(k) for k in required):
+            return None
+
+        video_ids = [
+            entry.get("youtube_id")
+            for entry in self.stats.get("videos", [])
+            if entry.get("youtube_id")
+        ]
+        if not video_ids:
+            return {}
+
+        credentials = Credentials(
+            token=None,
+            refresh_token=youtube_config["refresh_token"],
+            token_uri=youtube_config.get("token_uri", "https://oauth2.googleapis.com/token"),
+            client_id=youtube_config["client_id"],
+            client_secret=youtube_config["client_secret"],
+            scopes=["https://www.googleapis.com/auth/youtube.readonly"],
+        )
+        youtube = build("youtube", "v3", credentials=credentials)
+
+        view_stats = {}
+        chunk_size = 50
+        for index in range(0, len(video_ids), chunk_size):
+            chunk = video_ids[index : index + chunk_size]
+            response = youtube.videos().list(part="statistics", id=",".join(chunk)).execute()
+            for item in response.get("items", []):
+                stats = item.get("statistics", {})
+                try:
+                    view_stats[item["id"]] = int(stats.get("viewCount", 0))
+                except (TypeError, ValueError):
+                    view_stats[item["id"]] = 0
+        return view_stats
+
     def format_stats(self):
         now = datetime.now(timezone.utc)
         today_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
@@ -812,11 +849,34 @@ class SoraApp(ctk.CTk):
         all_time = summarize()
         today = summarize(today_start)
         week = summarize(week_start)
+        view_stats = self.fetch_youtube_view_stats()
+        view_lines = []
+        if view_stats is None:
+            view_lines.append("Недоступно (включите YouTube и заполните OAuth-данные).")
+        elif not view_stats:
+            view_lines.append("Нет данных по просмотрам (нет сохраненных YouTube ID).")
+        else:
+            total_views = sum(view_stats.values())
+            view_lines.append(f"Всего просмотров: {total_views}")
+            recent = sorted(
+                self.stats.get("videos", []),
+                key=lambda x: x.get("timestamp", ""),
+                reverse=True,
+            )[:10]
+            for entry in recent:
+                youtube_id = entry.get("youtube_id")
+                if not youtube_id:
+                    continue
+                topic = entry.get("topic", "unknown")
+                views = view_stats.get(youtube_id, "н/д")
+                view_lines.append(f"- {topic} ({youtube_id}): {views}")
+        views_text = "\n".join(view_lines)
         return (
             "📊 Статистика публикаций\n\n"
             f"За все время:\n{all_time}\n\n"
             f"За неделю:\n{week}\n\n"
-            f"За сегодня:\n{today}"
+            f"За сегодня:\n{today}\n\n"
+            f"📺 YouTube Shorts просмотры\n{views_text}"
         )
 
 if __name__ == "__main__":
