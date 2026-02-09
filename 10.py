@@ -5,6 +5,10 @@ import threading
 import logging
 import time
 import random
+import re
+import shutil
+import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
 import customtkinter as ctk
 from aiogram import Bot, Dispatcher, types, F
@@ -61,6 +65,12 @@ class SoraWorker:
             await asyncio.sleep(0.5) 
         except Exception: pass
 
+    def _clean_prompt_line(self, line):
+        cleaned = line.strip().strip('"').strip()
+        cleaned = cleaned.lstrip("-•").strip()
+        cleaned = re.sub(r"^\d+[\).\-\s]+", "", cleaned).strip()
+        return cleaned.replace('"', "")
+
     async def get_smart_prompt(self, topic):
         try:
             await self.update_status("Вход в ChatGPT...", 10)
@@ -91,7 +101,56 @@ class SoraWorker:
             await copy_btn.wait_for(state="visible", timeout=70000)
             
             last_msg = self.page.locator("[data-message-author-role='assistant']").last
-            return (await last_msg.inner_text()).strip().replace('"', '')
+            return self._clean_prompt_line((await last_msg.inner_text()).strip())
+        except Exception as e:
+            logging.error(f"ChatGPT Error: {e}")
+            return None
+
+    async def get_series_prompts(self, topic, count, storyline=False):
+        try:
+            await self.update_status("Вход в ChatGPT...", 10)
+            await self.page.goto("https://chatgpt.com/", timeout=60000)
+            await asyncio.sleep(3)
+
+            await self.update_status("Поиск проекта...", 20)
+            project_btn = self.page.locator('a[href*="generatsiia-video/project"]')
+            await project_btn.wait_for(state="visible", timeout=15000)
+            await project_btn.click()
+            await asyncio.sleep(4)
+
+            await self.update_status("Генерация серии промтов...", 35)
+            input_div = self.page.locator("#prompt-textarea")
+            await input_div.wait_for(state="visible")
+
+            storyline_text = (
+                "Write them as a 3-part storyline with the same arc. "
+                "Each prompt should focus on a different main subject, but keep a consistent narrative. "
+                "If the topic mentions engines, make them cartoon engines with distinct personalities."
+                if storyline
+                else "Keep the same theme but vary subjects/details between prompts. "
+            )
+            instruction = (
+                f"Generate {count} unique, fast-paced 10-second video prompts for Sora AI about: {topic}. "
+                "Output ONLY the English prompts, each on a new line. Max 250 characters each. "
+                f"{storyline_text}"
+                "Intense movement, 4k. IMPORTANT: Each video must be a perfect SEAMLESS LOOP; "
+                "the first and last frames must be identical."
+            )
+            await input_div.fill(instruction)
+            await input_div.press("Enter")
+            await asyncio.sleep(30)
+            await self.update_status("Жду ответа GPT...", 50)
+            copy_btn = self.page.locator('button:has(svg use[href*="f6d0e2"]), button[aria-label="Copy"]').last
+            await copy_btn.wait_for(state="visible", timeout=70000)
+
+            last_msg = self.page.locator("[data-message-author-role='assistant']").last
+            raw_text = (await last_msg.inner_text()).strip()
+            prompts = []
+            for line in raw_text.splitlines():
+                cleaned = self._clean_prompt_line(line)
+                if cleaned:
+                    prompts.append(cleaned)
+            return prompts[:count]
         except Exception as e:
             logging.error(f"ChatGPT Error: {e}")
             return None
@@ -443,6 +502,13 @@ class SoraApp(ctk.CTk):
                     "static_description": "AI video from Sora2.",
                 },
             },
+            "series": {
+                "size": 3,
+                "rotate_topics": False,
+                "shuffle_topics": True,
+                "combine": True,
+                "storyline": True,
+            },
         }
         if os.path.exists("config.json"):
             with open("config.json", "r", encoding="utf-8") as f:
@@ -454,6 +520,7 @@ class SoraApp(ctk.CTk):
                     **defaults["tiktok"]["prompt_mode"],
                     **self.config.get("tiktok", {}).get("prompt_mode", {}),
                 }
+                merged["series"] = {**defaults["series"], **self.config.get("series", {})}
                 self.config = merged
                 self.token_entry.insert(0, self.config.get("bot_token", ""))
                 self.chat_entry.insert(0, self.config.get("target_chat_id", ""))
@@ -506,6 +573,7 @@ class SoraApp(ctk.CTk):
                 "schedule": schedule,
             },
             "tiktok": self.config.get("tiktok", {}),
+            "series": self.config.get("series", {}),
         }
         with open("config.json", "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=4, ensure_ascii=False)
@@ -650,10 +718,19 @@ class SoraApp(ctk.CTk):
                 return
             topic = random.choice(self.config["topics"])
             await m.answer(f"🎲 Случайная тема: {topic}")
-            await start_topic_pipeline(m, topic)
+            await start_topic_pipeline(m, topic, topic_cycle=self.config["topics"])
 
-        async def start_topic_pipeline(message: types.Message, topic: str):
-            if topic not in self.config["topics"] or not self.bot_running:
+        @dp.message(F.text.startswith("/topic"))
+        async def cmd_custom_topic(m: types.Message):
+            raw_topic = m.text.replace("/topic", "", 1).strip()
+            if not raw_topic:
+                await m.answer("Введите тему после команды. Пример: /topic Три разных двигателя...")
+                return
+            await m.answer(f"📝 Пользовательская тема: {raw_topic}")
+            await start_topic_pipeline(m, raw_topic, allow_any=True)
+
+        async def start_topic_pipeline(message: types.Message, topic: str, topic_cycle=None, allow_any=False):
+            if (not allow_any and topic not in self.config["topics"]) or not self.bot_running:
                 return
             
             user_id = message.from_user.id
@@ -702,23 +779,78 @@ class SoraApp(ctk.CTk):
                         logging.error("Периодичность публикации должна быть больше 0 минут.")
                         interval_minutes = 1
 
+                    series_config = self.config.get("series", {})
+                    series_size = max(1, int(series_config.get("size", 1) or 1))
+                    rotate_topics = bool(series_config.get("rotate_topics", False))
+                    shuffle_topics = bool(series_config.get("shuffle_topics", True))
+                    combine_series = bool(series_config.get("combine", True))
+                    storyline = bool(series_config.get("storyline", True))
+                    cycle_topics = list(topic_cycle or [])
+                    if cycle_topics and shuffle_topics:
+                        random.shuffle(cycle_topics)
+
                     while self.active_sessions.get(user_id) and self.bot_running:
                         # Создаем сообщение прогресса
                         status_msg = await self.safe_send_message(bot, dest, "🎬 Начало цикла...")
                         dest = status_msg.chat.id
                         worker = SoraWorker(page, status_msg, bot, dest)
-                        
+
                         # 1. ChatGPT
-                        prompt = await worker.get_smart_prompt(topic)
-                        if not prompt:
+                        if rotate_topics and cycle_topics:
+                            topic = cycle_topics.pop(0)
+                            cycle_topics.append(topic)
+                            await self.safe_send_message(bot, dest, f"🧭 Новая тема: {topic}")
+
+                        if series_size > 1:
+                            series_prompts = await worker.get_series_prompts(topic, series_size, storyline=storyline)
+                        else:
+                            single_prompt = await worker.get_smart_prompt(topic)
+                            series_prompts = [single_prompt] if single_prompt else []
+
+                        if not series_prompts:
                             await self.safe_send_message(dest=dest, bot=bot, text="❌ Ошибка ChatGPT. Повтор...")
                             await asyncio.sleep(20)
                             continue
-                            
-                        # 2. Sora
-                        video_file = await worker.run_sora(prompt)
-                        
-                        if video_file and os.path.exists(video_file):
+
+                        # 2. Sora (генерация серии роликов)
+                        video_files = []
+                        for prompt in series_prompts:
+                            if not prompt:
+                                continue
+                            video_file = await worker.run_sora(prompt)
+                            if video_file and os.path.exists(video_file):
+                                video_files.append(video_file)
+                            else:
+                                await self.safe_send_message(bot, dest, "❌ Sora не отдала файл.")
+                                break
+
+                        if len(video_files) != len(series_prompts):
+                            for path in video_files:
+                                try:
+                                    os.remove(path)
+                                except OSError:
+                                    pass
+                            await asyncio.sleep(10)
+                            continue
+
+                        final_video = video_files[0]
+                        combined_prompt = " | ".join(series_prompts)
+                        if combine_series and len(video_files) > 1:
+                            final_video, concat_error = self.concat_videos(video_files)
+                            if not final_video:
+                                message = "❌ Не удалось объединить видео."
+                                if concat_error:
+                                    message = f"{message}\n\n{concat_error}"
+                                await self.safe_send_message(bot, dest, message)
+                                for path in video_files:
+                                    try:
+                                        os.remove(path)
+                                    except OSError:
+                                        pass
+                                await asyncio.sleep(10)
+                                continue
+
+                        if final_video and os.path.exists(final_video):
                             youtube_id = None
                             try:
                                 scheduled_publish_at = None
@@ -733,9 +865,9 @@ class SoraApp(ctk.CTk):
                                         scheduled_publish_at,
                                     )
                                 youtube_id = await worker.upload_to_youtube(
-                                    video_file,
+                                    final_video,
                                     topic,
-                                    prompt,
+                                    combined_prompt,
                                     self.config.get("youtube", {}),
                                     publish_at=scheduled_publish_at,
                                 )
@@ -743,9 +875,9 @@ class SoraApp(ctk.CTk):
                                 logging.error(f"YouTube upload error: {e}")
 
                             await worker.upload_to_tiktok(
-                                video_file,
+                                final_video,
                                 topic,
-                                prompt,
+                                combined_prompt,
                                 self.config.get("tiktok", {}),
                                 self.config.get("tiktok", {}).get("prompt_mode", {}),
                             )
@@ -763,11 +895,17 @@ class SoraApp(ctk.CTk):
                                 scheduled_publish_at_dt,
                             )
 
-                            os.remove(video_file)
+                            os.remove(final_video)
+                            if final_video != video_files[0]:
+                                for path in video_files:
+                                    try:
+                                        os.remove(path)
+                                    except OSError:
+                                        pass
                             try: await bot.delete_message(status_msg.chat.id, status_msg.message_id)
                             except: pass
                         else:
-                            await self.safe_send_message(bot, dest, "❌ Sora не отдала файл.")
+                            await self.safe_send_message(bot, dest, "❌ Финальный файл не найден.")
 
                         if schedule_active and remaining_uploads == 0:
                             self.active_sessions[user_id] = False
@@ -818,6 +956,84 @@ class SoraApp(ctk.CTk):
             f"За неделю:\n{week}\n\n"
             f"За сегодня:\n{today}"
         )
+
+    def concat_videos(self, video_files):
+        if len(video_files) < 2:
+            return (video_files[0] if video_files else None), None
+        if not shutil.which("ffmpeg"):
+            message = "ffmpeg не найден. Установите ffmpeg для склейки видео."
+            logging.error(message)
+            return None, message
+        list_path = None
+        try:
+            with tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt") as list_file:
+                for path in video_files:
+                    list_file.write(f"file '{os.path.abspath(path)}'\n")
+                list_path = list_file.name
+            output_path = f"combined_{int(time.time())}.mp4"
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                list_path,
+                "-c",
+                "copy",
+                output_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                stderr_text = result.stderr.strip()
+                logging.error("ffmpeg concat error: %s", stderr_text)
+                output_path = f"combined_{int(time.time())}_reencoded.mp4"
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    list_path,
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    "23",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    output_path,
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    reencode_stderr = result.stderr.strip()
+                    logging.error("ffmpeg reencode concat error: %s", reencode_stderr)
+                    message = "ffmpeg ошибка при склейке:\n"
+                    message += self._truncate_ffmpeg_error(stderr_text, reencode_stderr)
+                    return None, message
+            return output_path, None
+        finally:
+            if list_path:
+                try:
+                    os.remove(list_path)
+                except OSError:
+                    pass
+
+    def _truncate_ffmpeg_error(self, *errors, limit=2000):
+        combined = "\n\n".join(error for error in errors if error)
+        if len(combined) > limit:
+            return combined[:limit] + "\n...(обрезано)"
+        return combined
 
 if __name__ == "__main__":
     app = SoraApp()
