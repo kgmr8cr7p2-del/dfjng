@@ -139,6 +139,7 @@ class SoraWorker:
             return None
 
         await self.update_status("Загрузка на YouTube...", 98)
+        logging.info("YouTube: начинаю загрузку файла.")
 
         def do_upload():
             required = ("client_id", "client_secret", "refresh_token")
@@ -191,7 +192,9 @@ class SoraWorker:
                 _, response = request.next_chunk()
             return response.get("id")
 
-        return await asyncio.to_thread(do_upload)
+        video_id = await asyncio.to_thread(do_upload)
+        logging.info("YouTube: загрузка завершена.")
+        return video_id
 
 # --- ИНТЕРФЕЙС ГРАФИЧЕСКОГО ОКНА ---
 class SoraApp(ctk.CTk):
@@ -385,6 +388,10 @@ class SoraApp(ctk.CTk):
                             publish_at = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
                             if publish_at <= now:
                                 publish_at += timedelta(days=1)
+                            logging.info(
+                                "YouTube расписание: стартовая публикация %s.",
+                                publish_at.isoformat(timespec="seconds"),
+                            )
                         except ValueError:
                             logging.error("Неверный формат времени публикации (ожидается HH:MM).")
                             publish_at = None
@@ -412,10 +419,16 @@ class SoraApp(ctk.CTk):
                             youtube_id = None
                             try:
                                 scheduled_publish_at = None
+                                scheduled_publish_at_dt = None
                                 if schedule_active and remaining_uploads > 0:
+                                    scheduled_publish_at_dt = publish_at
                                     scheduled_publish_at = publish_at.isoformat(timespec="seconds")
                                     publish_at += timedelta(minutes=interval_minutes)
                                     remaining_uploads -= 1
+                                    logging.info(
+                                        "YouTube расписание: поставлено на публикацию %s.",
+                                        scheduled_publish_at,
+                                    )
                                 youtube_id = await worker.upload_to_youtube(
                                     video_file,
                                     topic,
@@ -437,6 +450,16 @@ class SoraApp(ctk.CTk):
                             os.remove(video_file)
                             try: await bot.delete_message(dest, status_msg.message_id)
                             except: pass
+
+                            if scheduled_publish_at_dt:
+                                now = datetime.now().astimezone()
+                                wait_seconds = (scheduled_publish_at_dt - now).total_seconds()
+                                if wait_seconds > 0:
+                                    logging.info(
+                                        "Ожидание публикации на YouTube: %s секунд.",
+                                        int(wait_seconds),
+                                    )
+                                    await asyncio.sleep(wait_seconds)
                         else:
                             await bot.send_message(dest, "❌ Sora не отдала файл.")
 
