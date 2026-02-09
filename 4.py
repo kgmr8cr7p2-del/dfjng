@@ -162,6 +162,8 @@ class SoraWorker:
             description = description_template.format(topic=topic, prompt=prompt)
             if youtube_config.get("append_shorts_tag", True):
                 description = f"{description}\n\n#shorts"
+                if "#shorts" not in title.lower():
+                    title = f"{title} #shorts"
 
             snippet = {
                 "title": title[:95],
@@ -169,6 +171,8 @@ class SoraWorker:
                 "categoryId": str(youtube_config.get("category_id", "22")),
             }
             tags = youtube_config.get("tags") or []
+            if youtube_config.get("append_shorts_tag", True) and "shorts" not in tags:
+                tags = [*tags, "shorts"]
             if tags:
                 snippet["tags"] = tags
 
